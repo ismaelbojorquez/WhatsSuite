@@ -15,6 +15,7 @@ import { responseWrapper } from './interfaces/http/middlewares/responseWrapper.j
 import backpressure from './interfaces/http/middlewares/backpressure.js';
 import enforceHttps from './interfaces/http/middlewares/enforceHttps.js';
 import sanitizeInput from './interfaces/http/middlewares/sanitizeInput.js';
+import { getStartupState, isStartupReady } from './infra/runtime/startupState.js';
 
 const app = express();
 
@@ -53,6 +54,22 @@ app.use((req, res, next) => {
     res.status(503).json({ error: 'Request timeout', requestId: res.locals.requestId });
   });
   next();
+});
+
+app.use((req, res, next) => {
+  if (isStartupReady()) {
+    next();
+    return;
+  }
+  if (req.path === '/api/v1/health/live' || req.path === '/api/v1/health/ready') {
+    next();
+    return;
+  }
+  res.status(503).json({
+    error: 'Service starting',
+    startup: getStartupState(),
+    requestId: res.locals.requestId
+  });
 });
 
 app.use('/api/v1', routesV1);

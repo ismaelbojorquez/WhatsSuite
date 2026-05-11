@@ -18,6 +18,12 @@ import { startBroadcastWorker, stopBroadcastWorker } from './modules/broadcast/b
 import { startDashboardAggregator } from './services/dashboardAggregatorService.js';
 import runPendingMigrations from './infra/db/migrationRunner.js';
 import { startChatInactivityMonitor, stopChatInactivityMonitor } from './services/chatInactivityService.js';
+import {
+  isStartupReady,
+  markStartupFailed,
+  markStartupReady,
+  setStartupPhase
+} from './infra/runtime/startupState.js';
 
 const server = http.createServer(app);
 
@@ -39,6 +45,10 @@ const io = new SocketIOServer(server, {
     credentials: true
   },
   allowRequest: (req, callback) => {
+    if (!isStartupReady()) {
+      callback('Service starting', false);
+      return;
+    }
     // Acepta conexiones con token tanto en query como en header para compatibilidad.
     const url = new URL(req.url, `http://${req.headers.host}`);
     const tokenInQuery = url.searchParams.get('token');
@@ -88,6 +98,21 @@ io.of('/events').on('connection', (socket) => {
 let autoAssignTimer = null;
 let dashboardAggTimer = null;
 
+const listenServer = async () =>
+  new Promise((resolve, reject) => {
+    const handleError = (err) => {
+      server.off('listening', handleListening);
+      reject(err);
+    };
+    const handleListening = () => {
+      server.off('error', handleError);
+      resolve();
+    };
+    server.once('error', handleError);
+    server.once('listening', handleListening);
+    server.listen(env.http.port);
+  });
+
 const startAutoAssignScheduler = async () => {
   await ensureSystemSettingsTable();
   const settings = await getSystemSettings();
@@ -103,19 +128,41 @@ const startAutoAssignScheduler = async () => {
 
 const start = async () => {
   try {
+    setStartupPhase('listening');
+    await listenServer();
+    logger.info({ port: env.http.port, env: env.nodeEnv }, 'HTTP server listening');
+
+    setStartupPhase('postgres');
     await pool.query('SELECT 1');
+
+    setStartupPhase('redis');
     await ensureRedisConnection();
+
+    setStartupPhase('migrations');
     await runPendingMigrations();
-    logger.info({ port: env.http.port, env: env.nodeEnv }, 'Starting WhatsSuite backend');
+
+    setStartupPhase('admin-seed');
     await ensureAdminSeed();
+
+    setStartupPhase('whatsapp-bootstrap');
     const recovered = await bootstrapValidSessions();
     logger.info({ recovered }, 'Bootstrap WhatsApp sessions');
+
+    setStartupPhase('auto-assign');
     await startAutoAssignScheduler();
+
+    setStartupPhase('broadcast-worker');
     startBroadcastWorker();
+
+    setStartupPhase('dashboard-aggregator');
     dashboardAggTimer = startDashboardAggregator();
+
+    setStartupPhase('chat-inactivity');
     startChatInactivityMonitor();
-    server.listen(env.http.port);
+    markStartupReady();
+    logger.info({ port: env.http.port, env: env.nodeEnv }, 'WhatsSuite backend ready');
   } catch (err) {
+    markStartupFailed(err);
     logger.error({ err }, 'Failed to bootstrap backend');
     process.exit(1);
   }

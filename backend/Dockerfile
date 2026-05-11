@@ -14,6 +14,6 @@ ENV TZ=UTC
 EXPOSE 3000
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s \
-  CMD wget -qO- --header="X-Forwarded-Proto: https" http://localhost:3000/api/v1/health/live || exit 1
+  CMD wget -qO- --header="X-Forwarded-Proto: https" http://localhost:3000/api/v1/health/ready || exit 1
 
 CMD ["node", "src/server.js"]

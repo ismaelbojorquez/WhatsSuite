@@ -68,7 +68,7 @@ services:
       TZ: ${TZ}
     depends_on:
       backend:
-        condition: service_started
+        condition: service_healthy
     restart: unless-stopped
     expose:
       - "80"
@@ -88,7 +88,7 @@ services:
       frontend:
         condition: service_started
       backend:
-        condition: service_started
+        condition: service_healthy
 
 volumes:
   postgres-data:
