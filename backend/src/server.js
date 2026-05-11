@@ -97,6 +97,8 @@ io.of('/events').on('connection', (socket) => {
 
 let autoAssignTimer = null;
 let dashboardAggTimer = null;
+let bootstrapTimer = null;
+let bootstrapping = false;
 
 const listenServer = async () =>
   new Promise((resolve, reject) => {
@@ -113,6 +115,21 @@ const listenServer = async () =>
     server.listen(env.http.port);
   });
 
+const scheduleBootstrapRetry = () => {
+  if (bootstrapTimer) return;
+  const retryMs = Math.max(1000, Number(env.startup?.retryMs || 5000));
+  bootstrapTimer = setTimeout(() => {
+    bootstrapTimer = null;
+    bootstrap().catch((err) => {
+      logger.error({ err }, 'Unexpected bootstrap retry failure');
+    });
+  }, retryMs);
+  if (typeof bootstrapTimer.unref === 'function') {
+    bootstrapTimer.unref();
+  }
+  logger.warn({ retryMs }, 'Startup bootstrap scheduled for retry');
+};
+
 const startAutoAssignScheduler = async () => {
   await ensureSystemSettingsTable();
   const settings = await getSystemSettings();
@@ -126,12 +143,10 @@ const startAutoAssignScheduler = async () => {
   }, intervalSeconds * 1000);
 };
 
-const start = async () => {
+const bootstrap = async () => {
+  if (bootstrapping || isStartupReady()) return;
+  bootstrapping = true;
   try {
-    setStartupPhase('listening');
-    await listenServer();
-    logger.info({ port: env.http.port, env: env.nodeEnv }, 'HTTP server listening');
-
     setStartupPhase('postgres');
     await pool.query('SELECT 1');
 
@@ -155,7 +170,9 @@ const start = async () => {
     startBroadcastWorker();
 
     setStartupPhase('dashboard-aggregator');
-    dashboardAggTimer = startDashboardAggregator();
+    if (!dashboardAggTimer) {
+      dashboardAggTimer = startDashboardAggregator();
+    }
 
     setStartupPhase('chat-inactivity');
     startChatInactivityMonitor();
@@ -163,13 +180,32 @@ const start = async () => {
     logger.info({ port: env.http.port, env: env.nodeEnv }, 'WhatsSuite backend ready');
   } catch (err) {
     markStartupFailed(err);
-    logger.error({ err }, 'Failed to bootstrap backend');
+    logger.error({ err }, 'Failed to bootstrap backend; service will stay up and retry');
+    scheduleBootstrapRetry();
+  } finally {
+    bootstrapping = false;
+  }
+};
+
+const start = async () => {
+  try {
+    setStartupPhase('listening');
+    await listenServer();
+    logger.info({ port: env.http.port, env: env.nodeEnv }, 'HTTP server listening');
+    await bootstrap();
+  } catch (err) {
+    markStartupFailed(err);
+    logger.error({ err }, 'Failed to start HTTP server');
     process.exit(1);
   }
 };
 
 const shutdown = async (signal) => {
   logger.info({ signal }, 'Graceful shutdown initiated');
+  if (bootstrapTimer) {
+    clearTimeout(bootstrapTimer);
+    bootstrapTimer = null;
+  }
   server.close(async () => {
     stopBroadcastWorker();
     stopChatInactivityMonitor();

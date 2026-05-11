@@ -118,6 +118,9 @@ const env = {
   workers: {
     realtimeConcurrency: numberFromEnv('WORKER_REALTIME_CONCURRENCY', 10),
     realtimeQueueLimit: numberFromEnv('WORKER_REALTIME_QUEUE', 500)
+  },
+  startup: {
+    retryMs: numberFromEnv('STARTUP_RETRY_MS', 5000)
   }
 };
 
