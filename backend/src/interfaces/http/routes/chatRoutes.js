@@ -14,7 +14,8 @@ import {
   reassignChatController,
   sendMediaMessageController,
   createChatController,
-  listChatConnectionsController
+  listChatConnectionsController,
+  listExportChatsByPhoneController
 } from '../controllers/chatController.js';
 import { ROLES } from '../../../domain/user/user.js';
 import { chatCreateValidator } from '../validators/chatValidators.js';
@@ -46,6 +47,11 @@ router.get(
   '/connections',
   authorize(ROLES.ADMIN, ROLES.SUPERVISOR, ROLES.AGENTE),
   listChatConnectionsController
+);
+router.get(
+  '/export/by-phone',
+  authorize(ROLES.ADMIN, ROLES.SUPERVISOR),
+  listExportChatsByPhoneController
 );
 
 // Messages in a chat

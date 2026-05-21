@@ -20,6 +20,7 @@ const Settings = lazy(() => import('./pages/Settings.jsx'));
 const NotFound = lazy(() => import('./pages/NotFound.jsx'));
 const QuickReplies = lazy(() => import('./pages/QuickReplies.jsx'));
 const Warmup = lazy(() => import('./pages/Warmup.jsx'));
+const ConversationExport = lazy(() => import('./pages/ConversationExport.jsx'));
 
 const RoleLanding = () => {
   const { user } = useAuth();
@@ -63,6 +64,14 @@ const App = () => {
             element={
               <PermissionGate roles={['ADMIN', 'SUPERVISOR']} fallback={<AccessDenied />}>
                 <QuickReplies />
+              </PermissionGate>
+            }
+          />
+          <Route
+            path="/exports"
+            element={
+              <PermissionGate roles={['ADMIN', 'SUPERVISOR']} fallback={<AccessDenied />}>
+                <ConversationExport />
               </PermissionGate>
             }
           />

@@ -13,7 +13,8 @@ import {
   findLatestClosedChatBySession,
   createChatForConnection,
   reopenChatRecord,
-  resolveTenantId
+  resolveTenantId,
+  listChatsByPhoneForExport
 } from '../infra/db/chatRepository.js';
 import { recordAuditLog } from '../infra/db/auditRepository.js';
 import { recordChatAudit } from '../infra/db/chatAuditRepository.js';
@@ -184,6 +185,24 @@ export const listVisibleChats = async (user, { status, limit, cursor, search } =
 export const chatSummary = async (user) => {
   if (!user) return { OPEN: 0, UNASSIGNED: 0, CLOSED: 0 };
   return listChatCountsByVisibility(user);
+};
+
+export const listExportChatsByPhone = async (user, { phone, limit } = {}) => {
+  const rawPhone = (phone || '').toString().trim();
+  const digits = normalizeWhatsAppNumber(rawPhone);
+  const rawDigits = rawPhone.replace(/[^\d]/g, '');
+  if (!rawDigits || rawDigits.length < 6 || rawDigits.length > 32) {
+    throw new AppError('Número de teléfono inválido', 400);
+  }
+  const phoneCandidates = Array.from(new Set([rawDigits, digits].filter(Boolean)));
+  if (!phoneCandidates.length) throw new AppError('Número de teléfono inválido', 400);
+
+  const items = await listChatsByPhoneForExport({ user, phoneCandidates, limit });
+  return {
+    phone: digits || rawDigits,
+    phoneCandidates,
+    items
+  };
 };
 
 export const closeChat = async (chatId, user, { ip = null } = {}) => {

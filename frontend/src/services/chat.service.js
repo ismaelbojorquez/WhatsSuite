@@ -87,6 +87,14 @@ export const createChatService = ({ getToken, onUnauthorized } = {}) => {
 
   const listConnections = async () => client.request('/chats/connections', { method: 'GET' });
 
+  const findChatsByPhoneForExport = async ({ phone, limit } = {}) => {
+    const qs = new URLSearchParams();
+    if (phone) qs.set('phone', phone);
+    if (limit) qs.set('limit', limit);
+    const query = qs.toString();
+    return client.request(`/chats/export/by-phone${query ? `?${query}` : ''}`, { method: 'GET' });
+  };
+
   return {
     getChats,
     getChatSummary,
@@ -99,7 +107,8 @@ export const createChatService = ({ getToken, onUnauthorized } = {}) => {
     reassignChat,
     deleteMessage,
     createChat,
-    listConnections
+    listConnections,
+    findChatsByPhoneForExport
   };
 };
 

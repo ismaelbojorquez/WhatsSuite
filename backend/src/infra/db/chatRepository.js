@@ -773,6 +773,67 @@ export const listChatsByVisibilityCursor = async ({ user, status, limit = 50, cu
   return { items, nextCursor };
 };
 
+export const listChatsByPhoneForExport = async ({ user, phoneCandidates = [], limit = 100 }) => {
+  await ensureChatSchema();
+  if (!user || !phoneCandidates.length) return [];
+
+  const safeLimit = Math.max(1, Math.min(Number(limit) || 100, 200));
+  const tenantId = await resolveTenantId(user.id);
+  const isAdmin = user.role === 'ADMIN';
+  const isSupervisor = user.role === 'SUPERVISOR';
+  const isAgent = user.role === 'AGENTE';
+
+  const queueIds = isAdmin ? [] : await getUserQueueIds(user.id);
+  if (!isAdmin && queueIds.length === 0) return [];
+
+  const params = [];
+  const filters = [];
+
+  params.push(phoneCandidates);
+  filters.push(
+    `(c.remote_number = ANY($${params.length})
+      OR regexp_replace(COALESCE(c.remote_jid, ''), '[^0-9]', '', 'g') = ANY($${params.length}))`
+  );
+
+  if (tenantId) {
+    params.push(tenantId);
+    filters.push(`c.tenant_id = $${params.length}`);
+  }
+
+  if (!isAdmin) {
+    params.push(queueIds);
+    if (isSupervisor) {
+      filters.push(`(c.queue_id IS NULL OR c.queue_id = ANY($${params.length}))`);
+    } else {
+      filters.push(`c.queue_id = ANY($${params.length})`);
+      filters.push('c.queue_id IS NOT NULL');
+    }
+  }
+
+  if (isAgent) {
+    params.push(user.id);
+    filters.push('UPPER(c.status) = \'OPEN\'');
+    filters.push(`c.assigned_agent_id = $${params.length}`);
+  }
+
+  params.push(safeLimit);
+
+  const { rows } = await pool.query(
+    `
+    SELECT c.*, u.full_name AS assigned_user_name, u.email AS assigned_user_email, q.name AS queue_name
+    FROM chats c
+    LEFT JOIN users u ON u.id = c.assigned_user_id
+    LEFT JOIN queues q ON q.id = c.queue_id
+    WHERE ${filters.join(' AND ')}
+    ORDER BY COALESCE(c.last_message_at, c.updated_at, c.created_at) DESC, c.id DESC
+    LIMIT $${params.length}
+    `,
+    params
+  );
+
+  return rows.map(mapChat);
+};
+
 export const listChatCountsByVisibility = async (user) => {
   await ensureChatSchema();
   const isAgent = user.role === 'AGENTE';

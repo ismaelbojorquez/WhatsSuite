@@ -7,7 +7,8 @@ import {
   reopenChat,
   chatSummary,
   createOrReopenChat,
-  listConnectionsForUserService
+  listConnectionsForUserService,
+  listExportChatsByPhone
 } from '../../../services/chatService.js';
 import { reassignChat } from '../../../services/chatReassignmentService.js';
 import { getChatMessages, sendMessage, sendMediaMessage } from '../../../services/chatMessageService.js';
@@ -108,6 +109,19 @@ export const createChatController = async (req, res, next) => {
 export const listChatConnectionsController = async (req, res, next) => {
   try {
     const data = await listConnectionsForUserService(req.user);
+    res.status(httpStatus.OK).json(ok(data));
+  } catch (err) {
+    next(err);
+  }
+};
+
+export const listExportChatsByPhoneController = async (req, res, next) => {
+  try {
+    const { phone, limit } = req.query;
+    const data = await listExportChatsByPhone(req.user, {
+      phone,
+      limit: limit ? Number(limit) : undefined
+    });
     res.status(httpStatus.OK).json(ok(data));
   } catch (err) {
     next(err);
