@@ -1,12 +1,13 @@
-import { useEffect } from 'react';
-import { Alert } from '@mui/material';
+import { useEffect, useState } from 'react';
+import { Alert, Button, Stack, TextField, Typography } from '@mui/material';
 import PageLayout from '../components/PageLayout.jsx';
 import WhatsAppSessionsList from '../components/whatsapp/WhatsAppSessionsList.jsx';
 import WhatsAppQRCodeModal from '../components/whatsapp/WhatsAppQRCodeModal.jsx';
 import WhatsAppPairingCodeModal from '../components/whatsapp/WhatsAppPairingCodeModal.jsx';
-import { WhatsappSessionsProvider, useWhatsappSessions } from '../context/WhatsappSessionsContext.jsx';
-import { Button, Stack, TextField, Typography } from '@mui/material';
-import { useState } from 'react';
+import ConnectionCountdownDialog from '../components/whatsapp/ConnectionCountdownDialog.jsx';
+import { useWhatsappSessions } from '../context/WhatsappSessionsContext.jsx';
+import { useConnectionCountdownsContext } from '../context/ConnectionCountdownContext.jsx';
+import { getCountdownRemainingMs } from '../utils/countdown.js';
 
 const WhatsappConnectionsContent = () => {
   const {
@@ -32,6 +33,13 @@ const WhatsappConnectionsContent = () => {
     }
   } = useWhatsappSessions();
   const [newSessionId, setNewSessionId] = useState('');
+  const [countdownSessionId, setCountdownSessionId] = useState(null);
+  const {
+    countdowns,
+    now: countdownNow,
+    startCountdown,
+    cancelCountdown
+  } = useConnectionCountdownsContext();
 
   useEffect(() => {
     loadExistingSessions();
@@ -39,6 +47,8 @@ const WhatsappConnectionsContent = () => {
 
   const activeQrSession = sessions.find((s) => s.id === activeQrSessionId);
   const activePairingSession = sessions.find((s) => s.id === activePairingSessionId);
+  const selectedCountdown = countdownSessionId ? countdowns[countdownSessionId] : null;
+  const selectedCountdownRemainingMs = getCountdownRemainingMs(selectedCountdown, countdownNow);
 
   return (
     <PageLayout
@@ -89,6 +99,9 @@ const WhatsappConnectionsContent = () => {
         onRefresh={syncSession}
         onPhoneChange={setPhone}
         onToggleSyncHistory={updateSyncHistory}
+        countdowns={countdowns}
+        countdownNow={countdownNow}
+        onManageCountdown={setCountdownSessionId}
       />
 
       <WhatsAppQRCodeModal
@@ -107,6 +120,16 @@ const WhatsappConnectionsContent = () => {
         sessionId={activePairingSession?.id}
         pairingCode={activePairingSession?.pairingCode}
         onClose={clearPairing}
+      />
+
+      <ConnectionCountdownDialog
+        open={Boolean(countdownSessionId)}
+        sessionId={countdownSessionId}
+        countdown={selectedCountdown}
+        remainingMs={selectedCountdownRemainingMs}
+        onClose={() => setCountdownSessionId(null)}
+        onStart={startCountdown}
+        onCancel={cancelCountdown}
       />
     </PageLayout>
   );

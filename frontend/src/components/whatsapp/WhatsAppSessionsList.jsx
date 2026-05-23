@@ -15,6 +15,9 @@ const WhatsAppSessionsList = ({
   onRefresh,
   onPhoneChange,
   onToggleSyncHistory = () => {},
+  countdowns = {},
+  countdownNow,
+  onManageCountdown,
   loading = false
 }) => {
   /* ===================== GLOBAL LOADING ===================== */
@@ -54,6 +57,9 @@ const WhatsAppSessionsList = ({
                 onRefresh={onRefresh}
                 onPhoneChange={onPhoneChange}
                 onToggleSyncHistory={onToggleSyncHistory}
+                countdown={countdowns[sessionId]}
+                countdownNow={countdownNow}
+                onManageCountdown={onManageCountdown}
               />
             )}
           </Box>

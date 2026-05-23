@@ -13,7 +13,9 @@ import {
   Typography
 } from '@mui/material';
 import Chip from '@mui/material/Chip';
+import AccessTimeIcon from '@mui/icons-material/AccessTime';
 import WhatsAppStatusBadge from './WhatsAppStatusBadge.jsx';
+import { formatCountdownClock, getCountdownRemainingMs } from '../../utils/countdown.js';
 
 const normalizeStatus = (status) => (typeof status === 'string' ? status.toLowerCase().trim() : '');
 const isConnected = (s) => normalizeStatus(s.status) === 'connected';
@@ -30,7 +32,10 @@ const WhatsAppSessionCard = ({
   onDelete,
   onRefresh,
   onPhoneChange,
-  onToggleSyncHistory
+  onToggleSyncHistory,
+  countdown,
+  countdownNow,
+  onManageCountdown
 }) => {
   const disabled = Boolean(session.loading);
   const sessionId = session.session || session.id;
@@ -50,6 +55,8 @@ const WhatsAppSessionCard = ({
   const syncHistory = Boolean(session.syncHistory);
   const syncStatus = session.historySyncStatus || 'idle';
   const syncLoading = Boolean(session.syncHistoryUpdating);
+  const countdownRemainingMs = getCountdownRemainingMs(countdown, countdownNow);
+  const countdownActive = countdownRemainingMs > 0;
   const syncStatusColor =
     syncStatus === 'running'
       ? 'warning'
@@ -145,6 +152,28 @@ const WhatsAppSessionCard = ({
           direction={{ xs: 'column', sm: 'row' }}
           spacing={1.5}
         >
+          <Tooltip
+            title={
+              countdownActive
+                ? 'Editar o detener el countdown de desbloqueo'
+                : 'Definir cuánto falta para que el teléfono se desbloquee'
+            }
+            arrow
+          >
+            <Button
+              variant={countdownActive ? 'contained' : 'outlined'}
+              color={countdownActive ? 'warning' : 'inherit'}
+              startIcon={<AccessTimeIcon />}
+              onClick={() => onManageCountdown?.(sessionId)}
+              sx={{ minWidth: { xs: '100%', sm: 190 } }}
+              aria-label={`Countdown de desbloqueo para ${sessionId}`}
+            >
+              {countdownActive
+                ? `Desbloqueo ${formatCountdownClock(countdownRemainingMs)}`
+                : 'Countdown desbloqueo'}
+            </Button>
+          </Tooltip>
+
           {canShowQr && (
             <Button
               variant="contained"
