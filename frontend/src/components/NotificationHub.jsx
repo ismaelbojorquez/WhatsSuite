@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Box, Paper, Typography, IconButton, Stack, Button, Fab, Badge } from '@mui/material';
 import { alpha } from '@mui/material/styles';
 import CloseIcon from '@mui/icons-material/Close';
@@ -6,6 +6,7 @@ import NotificationsIcon from '@mui/icons-material/Notifications';
 import { useAuth } from '../context/AuthContext.jsx';
 import { useNavigate } from 'react-router-dom';
 import { getEventsSocket } from '../lib/eventsSocket.js';
+import { LOCAL_NOTIFICATION_EVENT } from '../lib/localNotifications.js';
 
 const playBeep = async () => {
   const audioUrl = '/notification.wav';
@@ -42,6 +43,56 @@ const NotificationHub = () => {
   const TTL_MS = 120000; // guardamos notificaciones 2 minutos
 
   const socket = useMemo(() => getEventsSocket(token), [token]);
+
+  const pushHubItem = useCallback((incoming = {}) => {
+    const now = Date.now();
+    const item = {
+      id: incoming.id || `notification-${now}`,
+      chatId: incoming.chatId || null,
+      from: incoming.from || incoming.title || 'Notificación',
+      preview: incoming.preview || incoming.message || '',
+      route: incoming.route || (incoming.chatId ? `/chat?chatId=${incoming.chatId}` : null),
+      actionLabel: incoming.actionLabel || (incoming.chatId ? 'Ver chat' : 'Abrir'),
+      ts: now
+    };
+
+    let isDuplicate = false;
+    setItems((prev) => {
+      const filtered = prev.filter((p) => now - p.ts < TTL_MS);
+      const exists = filtered.find((p) => p.id === item.id);
+      if (exists) {
+        isDuplicate = true;
+        return filtered;
+      }
+      const next = [...filtered, item];
+      return next.slice(-10);
+    });
+
+    if (isDuplicate) return;
+
+    setOpenPanel(true);
+    playBeep();
+
+    if (typeof Notification !== 'undefined') {
+      if (Notification.permission === 'default') {
+        const request = Notification.requestPermission();
+        if (request?.catch) request.catch(() => {});
+      }
+      if (Notification.permission === 'granted') {
+        try {
+          const n = new Notification(incoming.browserTitle || item.from, {
+            body: incoming.browserBody || item.preview,
+            tag: String(item.id)
+          });
+          n.onclick = () => {
+            if (item.route) navigateRef.current?.(item.route);
+          };
+        } catch (_) {
+          // ignore notification errors
+        }
+      }
+    }
+  }, []);
 
   useEffect(() => {
     userRef.current = user;
@@ -80,40 +131,16 @@ const NotificationHub = () => {
       }
 
       const baseId = evt?.messageId || evt?.message?.id || evt?.message?.whatsappMessageId || chatId;
-      const item = {
+      pushHubItem({
         id: baseId,
         chatId,
         from,
         preview,
-        ts: Date.now()
-      };
-
-      let isDuplicate = false;
-      setItems((prev) => {
-        const filtered = prev.filter((p) => Date.now() - p.ts < TTL_MS);
-        // evita duplicados por mismo id
-        const exists = filtered.find((p) => p.id === item.id);
-        if (exists) {
-          isDuplicate = true;
-          return filtered;
-        }
-        const next = [...filtered, item];
-        return next.slice(-10);
+        route: `/chat?chatId=${chatId || ''}`,
+        actionLabel: 'Ver chat',
+        browserTitle: `Nuevo mensaje de ${from}`,
+        browserBody: preview
       });
-      if (!isDuplicate) setOpenPanel(true);
-
-      if (!isDuplicate) playBeep();
-      if (typeof Notification !== 'undefined') {
-        if (Notification.permission === 'default') Notification.requestPermission().catch(() => {});
-        if (Notification.permission === 'granted') {
-          try {
-            const n = new Notification(`Nuevo mensaje de ${from}`, { body: preview, tag: item.id });
-            n.onclick = () => navigateRef.current?.(`/chat?chatId=${chatId || ''}`);
-          } catch (_) {
-            // ignore notification errors
-          }
-        }
-      }
     };
 
     const handleMessageUpdate = (evt) => {
@@ -143,11 +170,30 @@ const NotificationHub = () => {
       socket.off('message:media', handleNew);
       socket.off('message:update', handleMessageUpdate);
     };
-  }, [socket]);
+  }, [pushHubItem, socket]);
+
+  useEffect(() => {
+    const handleLocalNotification = (event) => {
+      const detail = event?.detail || {};
+      pushHubItem({
+        id: detail.id,
+        from: detail.title,
+        preview: detail.preview || detail.message,
+        route: detail.route,
+        actionLabel: detail.actionLabel,
+        browserTitle: detail.browserTitle || detail.title,
+        browserBody: detail.browserBody || detail.message
+      });
+    };
+
+    window.addEventListener(LOCAL_NOTIFICATION_EVENT, handleLocalNotification);
+    return () => window.removeEventListener(LOCAL_NOTIFICATION_EVENT, handleLocalNotification);
+  }, [pushHubItem]);
 
   useEffect(() => {
     if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
-      Notification.requestPermission().catch(() => {});
+      const request = Notification.requestPermission();
+      if (request?.catch) request.catch(() => {});
     }
   }, []);
 
@@ -160,13 +206,14 @@ const NotificationHub = () => {
 
   if (!token) return null;
 
-  const openChat = (chatId) => {
+  const openItem = (item) => {
     setOpenPanel(false);
-    navigate(`/chat?chatId=${chatId || ''}`);
-    if (!chatId) {
-      setItems([]);
+    if (item.route) navigate(item.route);
+
+    if (item.chatId) {
+      setItems((prev) => prev.filter((p) => p.chatId !== item.chatId));
     } else {
-      setItems((prev) => prev.filter((p) => p.chatId !== chatId));
+      setItems((prev) => prev.filter((p) => p.id !== item.id));
     }
   };
 
@@ -217,9 +264,11 @@ const NotificationHub = () => {
                 {item.preview}
               </Typography>
               <Stack direction="row" spacing={1}>
-                <Button size="small" variant="contained" onClick={() => openChat(item.chatId)}>
-                  Ver chat
-                </Button>
+                {item.route && (
+                  <Button size="small" variant="contained" onClick={() => openItem(item)}>
+                    {item.actionLabel || 'Abrir'}
+                  </Button>
+                )}
                 <Button size="small" variant="text" onClick={() => setItems((prev) => prev.filter((p) => p.id !== item.id))}>
                   Ocultar
                 </Button>

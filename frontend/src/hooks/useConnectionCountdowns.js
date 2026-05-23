@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNotify } from '../context/NotifyContext.jsx';
+import { dispatchLocalNotification } from '../lib/localNotifications.js';
 
 const STORAGE_KEY = 'whatssuite.connectionCountdowns.v1';
 
@@ -52,19 +53,6 @@ const requestNotificationPermission = () => {
   if (request?.catch) request.catch(() => {});
 };
 
-const showBrowserNotification = (sessionId) => {
-  if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return;
-
-  try {
-    new Notification('Teléfono desbloqueado', {
-      body: `La conexión ${sessionId} ya se puede volver a conectar.`,
-      tag: `connection-countdown-${sessionId}`
-    });
-  } catch {
-    // Browser notifications are best-effort; the app toast is still shown.
-  }
-};
-
 export const useConnectionCountdowns = () => {
   const { notify } = useNotify();
   const [countdowns, setCountdowns] = useState(readStoredCountdowns);
@@ -99,12 +87,21 @@ export const useConnectionCountdowns = () => {
     expired.forEach((countdown) => {
       if (notifiedRef.current.has(countdown.sessionId)) return;
       notifiedRef.current.add(countdown.sessionId);
+      const message = `El teléfono de ${countdown.sessionId} ya se desbloqueó y se puede volver a conectar.`;
       notify({
-        message: `El teléfono de ${countdown.sessionId} ya se desbloqueó y se puede volver a conectar.`,
+        message,
         severity: 'success',
         duration: 7000
       });
-      showBrowserNotification(countdown.sessionId);
+      dispatchLocalNotification({
+        id: `connection-countdown-${countdown.sessionId}-${countdown.endsAt}`,
+        title: 'Teléfono desbloqueado',
+        message,
+        route: '/whatsapp',
+        actionLabel: 'Ver conexiones',
+        browserTitle: 'Teléfono desbloqueado',
+        browserBody: `La conexión ${countdown.sessionId} ya se puede volver a conectar.`
+      });
     });
   }, [commitCountdowns, countdowns, notify, now]);
 
