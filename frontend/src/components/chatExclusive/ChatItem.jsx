@@ -10,15 +10,7 @@ import {
 import { alpha } from '@mui/material/styles';
 import { useEffect, useMemo, useState } from 'react';
 import { useAuth } from '../../context/AuthContext.jsx';
-import { getWhatsAppStatusColor } from '../../utils/whatsappStatus.js';
-
-const STATUS_COLOR = {
-  UNASSIGNED: 'warning',
-  ASSIGNED: 'primary',
-  OPEN: 'primary',
-  CLOSED: 'default',
-  BLOCKED: 'error'
-};
+import { normalizeWhatsAppStatus } from '../../utils/whatsappStatus.js';
 
 const avatarCache = new Map();
 
@@ -28,7 +20,7 @@ const ChatItem = ({ chat, selected, onSelect, unread = 0 }) => {
 
   const queueLabel = chat.queueName || chat.queue || 'Sin cola';
   const agentLabel = chat.assignedUserName || 'Sin asignar';
-  const statusColor = getWhatsAppStatusColor(chat.whatsappStatus || chat.whatsapp_status);
+  const connectionStatus = normalizeWhatsAppStatus(chat.whatsappStatus || chat.whatsapp_status);
   const connectionLabel = chat.whatsappSessionName || chat.whatsapp_session_name || 'Sin conexión';
   const avatarUrl =
     chat.contactAvatar ||
@@ -170,8 +162,25 @@ const ChatItem = ({ chat, selected, onSelect, unread = 0 }) => {
             <Chip
               size="small"
               label={connectionLabel}
-              color={statusColor}
-              sx={{ height: 18, fontSize: 11 }}
+              sx={(theme) => {
+                const palette = (() => {
+                  if (connectionStatus === 'connected') return theme.palette.success;
+                  if (connectionStatus === 'pending') return theme.palette.info;
+                  if (connectionStatus === 'connecting' || connectionStatus === 'restarting' || connectionStatus === 'pairing_code') {
+                    return theme.palette.warning;
+                  }
+                  if (connectionStatus === 'invalid' || connectionStatus === 'error') return theme.palette.error;
+                  return null;
+                })();
+                return {
+                  height: 18,
+                  fontSize: 11,
+                  bgcolor: palette ? palette.main : theme.palette.action.selected,
+                  color: palette ? palette.contrastText : theme.palette.text.secondary,
+                  borderColor: palette ? palette.main : theme.palette.divider,
+                  '& .MuiChip-label': { px: 1 }
+                };
+              }}
             />
           </Stack>
 
