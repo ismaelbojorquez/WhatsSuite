@@ -9,7 +9,7 @@ const upsertMessagesDaily = async () => {
     `
     WITH stats AS (
       SELECT
-        cm.timestamp::date AS date_key,
+        COALESCE(cm.timestamp, cm.created_at)::date AS date_key,
         COALESCE(c.queue_id, $1::uuid) AS queue_id,
         COALESCE(c.assigned_agent_id, $1::uuid) AS agent_id,
         COUNT(*) AS total_mensajes,
@@ -19,7 +19,7 @@ const upsertMessagesDaily = async () => {
         COUNT(*) FILTER (WHERE (cm.content->'media'->>'type') = 'audio' OR cm.content->>'payload_type' = 'audio') AS audios_out
       FROM chat_messages cm
       INNER JOIN chats c ON c.id = cm.chat_id
-      WHERE cm.timestamp::date >= CURRENT_DATE - INTERVAL '2 days'
+      WHERE COALESCE(cm.timestamp, cm.created_at) >= CURRENT_DATE - INTERVAL '2 days'
       GROUP BY 1,2,3
     )
     INSERT INTO dashboard_messages_daily (date_key, queue_id, agent_id, status, total_mensajes, mensajes_in, mensajes_out, archivos_out, audios_out)
@@ -49,7 +49,7 @@ const upsertChatsDaily = async () => {
         COUNT(*) FILTER (WHERE UPPER(c.status) = 'CLOSED') AS total_cerrados,
         0::numeric(12,2) AS avg_tiempo_respuesta_secs
       FROM chats c
-      WHERE COALESCE(c.updated_at, c.last_message_at, c.created_at)::date >= CURRENT_DATE - INTERVAL '2 days'
+      WHERE COALESCE(c.updated_at, c.last_message_at, c.created_at) >= CURRENT_DATE - INTERVAL '2 days'
       GROUP BY 1,2,3
     )
     INSERT INTO dashboard_chats_daily (date_key, queue_id, agent_id, status, total_chats, total_abiertos, total_cerrados, avg_tiempo_respuesta_secs)

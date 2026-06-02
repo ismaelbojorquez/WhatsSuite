@@ -1,6 +1,8 @@
 import { AppError } from '../../shared/errors.js';
 import pool from './postgres.js';
 
+const BROADCAST_INSERT_CHUNK_SIZE = 500;
+
 export const defaultTenant = async () => {
   const { rows } = await pool.query("SELECT id FROM tenants WHERE name = 'default' LIMIT 1");
   return rows[0]?.id || null;
@@ -85,11 +87,12 @@ export const insertBroadcastMessages = async ({ campaignId, templateId, messageT
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    for (const msg of messages) {
-      await client.query(
-        `INSERT INTO broadcast_messages (campaign_id, template_id, target, message_type, payload, status, max_attempts, next_attempt_at, tenant_id)
-         VALUES ($1,$2,$3,$4,$5,'pending',$6,$7,$8)`,
-        [
+    for (let start = 0; start < messages.length; start += BROADCAST_INSERT_CHUNK_SIZE) {
+      const chunk = messages.slice(start, start + BROADCAST_INSERT_CHUNK_SIZE);
+      const values = [];
+      const placeholders = chunk.map((msg, idx) => {
+        const base = idx * 8;
+        values.push(
           campaignId,
           templateId || null,
           msg.target,
@@ -98,7 +101,13 @@ export const insertBroadcastMessages = async ({ campaignId, templateId, messageT
           msg.maxAttempts || 3,
           msg.nextAttemptAt || new Date(),
           resolvedTenant
-        ]
+        );
+        return `($${base + 1},$${base + 2},$${base + 3},$${base + 4},$${base + 5},'pending',$${base + 6},$${base + 7},$${base + 8})`;
+      });
+      await client.query(
+        `INSERT INTO broadcast_messages (campaign_id, template_id, target, message_type, payload, status, max_attempts, next_attempt_at, tenant_id)
+         VALUES ${placeholders.join(',')}`,
+        values
       );
     }
     await client.query(

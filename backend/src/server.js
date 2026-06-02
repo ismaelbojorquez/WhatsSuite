@@ -18,6 +18,7 @@ import { startBroadcastWorker, stopBroadcastWorker } from './modules/broadcast/b
 import { startDashboardAggregator } from './services/dashboardAggregatorService.js';
 import runPendingMigrations from './infra/db/migrationRunner.js';
 import { startChatInactivityMonitor, stopChatInactivityMonitor } from './services/chatInactivityService.js';
+import { startPartitionMaintenance, stopPartitionMaintenance } from './services/partitionMaintenanceService.js';
 import {
   isStartupReady,
   markStartupFailed,
@@ -98,6 +99,7 @@ io.of('/events').on('connection', (socket) => {
 let autoAssignTimer = null;
 let dashboardAggTimer = null;
 let bootstrapTimer = null;
+let partitionMaintenanceTimer = null;
 let bootstrapping = false;
 
 const listenServer = async () =>
@@ -156,6 +158,11 @@ const bootstrap = async () => {
     setStartupPhase('migrations');
     await runPendingMigrations();
 
+    setStartupPhase('partition-maintenance');
+    if (!partitionMaintenanceTimer) {
+      partitionMaintenanceTimer = startPartitionMaintenance();
+    }
+
     setStartupPhase('admin-seed');
     await ensureAdminSeed();
 
@@ -209,6 +216,7 @@ const shutdown = async (signal) => {
   server.close(async () => {
     stopBroadcastWorker();
     stopChatInactivityMonitor();
+    stopPartitionMaintenance();
     if (dashboardAggTimer) clearInterval(dashboardAggTimer);
     await shutdownWhatsAppSessions();
     await closeRedis();

@@ -1,13 +1,46 @@
 import pool from '../../infra/db/postgres.js';
 import logger from '../../infra/logging/logger.js';
 
+const dashboardCache = new Map();
+const dashboardCacheTtlMs = 60_000;
+
+const cacheKey = (scope, start, end) => `${scope}:${start}:${end}`;
+
+const getDashboardCache = async (scope, start, end) => {
+  const key = cacheKey(scope, start, end);
+  const entry = dashboardCache.get(key);
+  if (!entry) return null;
+  if (entry.expiresAt <= Date.now()) {
+    dashboardCache.delete(key);
+    return null;
+  }
+  return entry.data;
+};
+
+const setDashboardCache = async (scope, start, end, data) => {
+  dashboardCache.set(cacheKey(scope, start, end), {
+    expiresAt: Date.now() + dashboardCacheTtlMs,
+    data
+  });
+};
+
+const invalidateDashboardCache = async () => {
+  dashboardCache.clear();
+};
+
 const ensureDates = (from, to) => {
   const start = new Date(from);
   const end = new Date(to);
   if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
     throw new Error('Fechas inválidas');
   }
-  return { start: start.toISOString().slice(0, 10), end: end.toISOString().slice(0, 10) };
+  const endExclusive = new Date(end);
+  endExclusive.setUTCDate(endExclusive.getUTCDate() + 1);
+  return {
+    start: start.toISOString().slice(0, 10),
+    end: end.toISOString().slice(0, 10),
+    endExclusive: endExclusive.toISOString().slice(0, 10)
+  };
 };
 
 const isEmptyOverview = (data) => {
@@ -24,7 +57,7 @@ const isEmptyOverview = (data) => {
   return numeric.every((v) => v === null || Number(v) === 0);
 };
 
-const fallbackOverview = async ({ start, end }) => {
+const fallbackOverview = async ({ start, endExclusive }) => {
   const { rows } = await pool.query(
     `
     WITH msgs AS (
@@ -35,7 +68,8 @@ const fallbackOverview = async ({ start, end }) => {
         COUNT(*) FILTER (WHERE content->'media' IS NOT NULL AND direction = 'out')::bigint AS archivos_enviados,
         COUNT(*) FILTER (WHERE content->'media'->>'type' = 'audio' AND direction = 'out')::bigint AS audios_enviados
       FROM chat_messages
-      WHERE created_at::date BETWEEN $1 AND $2
+      WHERE created_at >= $1::date
+        AND created_at < $2::date
     ),
     chats AS (
       SELECT
@@ -43,7 +77,8 @@ const fallbackOverview = async ({ start, end }) => {
         COUNT(*) FILTER (WHERE status = 'CLOSED')::bigint AS total_chats_cerrados,
         AVG(EXTRACT(EPOCH FROM (updated_at - created_at)))::numeric(12,2) AS tiempo_respuesta_promedio
       FROM chats
-      WHERE COALESCE(updated_at, last_message_at, created_at)::date BETWEEN $1 AND $2
+      WHERE COALESCE(updated_at, last_message_at, created_at) >= $1::date
+        AND COALESCE(updated_at, last_message_at, created_at) < $2::date
     )
     SELECT
       msgs.total_mensajes,
@@ -56,12 +91,12 @@ const fallbackOverview = async ({ start, end }) => {
       chats.tiempo_respuesta_promedio
     FROM msgs, chats
   `,
-    [start, end]
+    [start, endExclusive]
   );
   return rows[0] || {};
 };
 
-const fallbackTimeseries = async ({ start, end }) => {
+const fallbackTimeseries = async ({ start, endExclusive }) => {
   const { rows } = await pool.query(
     `
     SELECT
@@ -70,16 +105,17 @@ const fallbackTimeseries = async ({ start, end }) => {
       COUNT(*) FILTER (WHERE direction = 'in')::bigint AS mensajes_entrantes,
       COUNT(*) FILTER (WHERE direction = 'out')::bigint AS mensajes_salientes
     FROM chat_messages
-    WHERE created_at::date BETWEEN $1 AND $2
+    WHERE created_at >= $1::date
+      AND created_at < $2::date
     GROUP BY created_at::date
     ORDER BY date_key ASC
   `,
-    [start, end]
+    [start, endExclusive]
   );
   return rows;
 };
 
-const fallbackChatsByQueue = async ({ start, end }) => {
+const fallbackChatsByQueue = async ({ start, endExclusive }) => {
   const { rows } = await pool.query(
     `
     SELECT
@@ -91,18 +127,22 @@ const fallbackChatsByQueue = async ({ start, end }) => {
       AVG(EXTRACT(EPOCH FROM (c.updated_at - c.created_at)))::numeric(12,2) AS tiempo_respuesta_promedio
     FROM chats c
     LEFT JOIN queues q ON q.id = c.queue_id
-    LEFT JOIN chat_messages m ON m.chat_id = c.id AND m.created_at::date BETWEEN $1 AND $2
-    WHERE COALESCE(c.updated_at, c.last_message_at, c.created_at)::date BETWEEN $1 AND $2
+    LEFT JOIN chat_messages m
+      ON m.chat_id = c.id
+     AND m.created_at >= $1::date
+     AND m.created_at < $2::date
+    WHERE COALESCE(c.updated_at, c.last_message_at, c.created_at) >= $1::date
+      AND COALESCE(c.updated_at, c.last_message_at, c.created_at) < $2::date
     GROUP BY c.queue_id, q.name
     ORDER BY total_mensajes DESC
   `,
-    [start, end]
+    [start, endExclusive]
   );
   return rows;
 };
 
 export const getOverviewMetrics = async ({ fecha_inicio, fecha_fin }) => {
-  const { start, end } = ensureDates(fecha_inicio, fecha_fin);
+  const { start, end, endExclusive } = ensureDates(fecha_inicio, fecha_fin);
   const { rows } = await pool.query(
     `
     WITH msgs AS (
@@ -139,13 +179,13 @@ export const getOverviewMetrics = async ({ fecha_inicio, fecha_fin }) => {
   let result = rows[0] || {};
   if (isEmptyOverview(result)) {
     logger.warn({ start, end, tag: 'DASHBOARD_FALLBACK' }, 'Falling back to live aggregates for overview');
-    result = await fallbackOverview({ start, end });
+    result = await fallbackOverview({ start, endExclusive });
   }
   return result;
 };
 
 export const getMessagesTimeseries = async ({ fecha_inicio, fecha_fin }) => {
-  const { start, end } = ensureDates(fecha_inicio, fecha_fin);
+  const { start, end, endExclusive } = ensureDates(fecha_inicio, fecha_fin);
   const { rows } = await pool.query(
     `
     SELECT
@@ -163,13 +203,16 @@ export const getMessagesTimeseries = async ({ fecha_inicio, fecha_fin }) => {
   let data = rows;
   if (!data.length) {
     logger.warn({ start, end, tag: 'DASHBOARD_FALLBACK' }, 'Falling back to live aggregates for timeseries');
-    data = await fallbackTimeseries({ start, end });
+    data = await fallbackTimeseries({ start, endExclusive });
   }
   return data;
 };
 
 export const getChatsByQueue = async ({ fecha_inicio, fecha_fin }) => {
-  const { start, end } = ensureDates(fecha_inicio, fecha_fin);
+  const { start, end, endExclusive } = ensureDates(fecha_inicio, fecha_fin);
+  const cached = await getDashboardCache('chats', start, end);
+  if (cached) return cached;
+
   const { rows } = await pool.query(
     `
     WITH msg AS (
@@ -205,7 +248,7 @@ export const getChatsByQueue = async ({ fecha_inicio, fecha_fin }) => {
   let data = rows;
   if (!data.length) {
     logger.warn({ start, end, tag: 'DASHBOARD_FALLBACK' }, 'Falling back to live aggregates for chats by queue');
-    data = await fallbackChatsByQueue({ start, end });
+    data = await fallbackChatsByQueue({ start, endExclusive });
   }
   await setDashboardCache('chats', start, end, data);
   return data;
@@ -230,7 +273,7 @@ export const logDashboardAccess = async ({ userId, endpoint, fecha_inicio, fecha
 export const clearDashboardCache = async () => invalidateDashboardCache();
 
 export const getDrilldown = async ({ fecha_inicio, fecha_fin, level }) => {
-  const { start, end } = ensureDates(fecha_inicio, fecha_fin);
+  const { start, endExclusive } = ensureDates(fecha_inicio, fecha_fin);
   const safeLevel = (level || '').toLowerCase();
   switch (safeLevel) {
     case 'agent': {
@@ -242,12 +285,13 @@ export const getDrilldown = async ({ fecha_inicio, fecha_fin, level }) => {
         FROM chat_messages m
         LEFT JOIN chats c ON c.id = m.chat_id
         LEFT JOIN users u ON u.id = c.assigned_user_id
-        WHERE m.created_at::date BETWEEN $1 AND $2
+        WHERE m.created_at >= $1::date
+          AND m.created_at < $2::date
         GROUP BY label
         ORDER BY value DESC
         LIMIT 20
       `,
-        [start, end]
+        [start, endExclusive]
       );
       return rows;
     }
@@ -258,12 +302,13 @@ export const getDrilldown = async ({ fecha_inicio, fecha_fin, level }) => {
           COALESCE(m.whatsapp_session_name, 'Desconocida') AS label,
           COUNT(*)::bigint AS value
         FROM chat_messages m
-        WHERE m.created_at::date BETWEEN $1 AND $2
+        WHERE m.created_at >= $1::date
+          AND m.created_at < $2::date
         GROUP BY m.whatsapp_session_name
         ORDER BY value DESC
         LIMIT 20
       `,
-        [start, end]
+        [start, endExclusive]
       );
       return rows;
     }
@@ -274,11 +319,12 @@ export const getDrilldown = async ({ fecha_inicio, fecha_fin, level }) => {
           TO_CHAR(m.created_at, 'HH24') AS label,
           COUNT(*)::bigint AS value
         FROM chat_messages m
-        WHERE m.created_at::date BETWEEN $1 AND $2
+        WHERE m.created_at >= $1::date
+          AND m.created_at < $2::date
         GROUP BY label
         ORDER BY label ASC
       `,
-        [start, end]
+        [start, endExclusive]
       );
       return rows;
     }
@@ -290,11 +336,12 @@ export const getDrilldown = async ({ fecha_inicio, fecha_fin, level }) => {
           m.created_at::date AS label,
           COUNT(*)::bigint AS value
         FROM chat_messages m
-        WHERE m.created_at::date BETWEEN $1 AND $2
+        WHERE m.created_at >= $1::date
+          AND m.created_at < $2::date
         GROUP BY m.created_at::date
         ORDER BY label ASC
       `,
-        [start, end]
+        [start, endExclusive]
       );
       return rows;
     }

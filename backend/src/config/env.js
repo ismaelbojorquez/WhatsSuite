@@ -119,6 +119,11 @@ const env = {
     realtimeConcurrency: numberFromEnv('WORKER_REALTIME_CONCURRENCY', 10),
     realtimeQueueLimit: numberFromEnv('WORKER_REALTIME_QUEUE', 500)
   },
+  maintenance: {
+    partitionIntervalHours: numberFromEnv('PARTITION_MAINTENANCE_INTERVAL_HOURS', 6),
+    partitionMonthsBack: numberFromEnv('PARTITION_MAINTENANCE_MONTHS_BACK', 2),
+    partitionMonthsAhead: numberFromEnv('PARTITION_MAINTENANCE_MONTHS_AHEAD', 12)
+  },
   startup: {
     retryMs: numberFromEnv('STARTUP_RETRY_MS', 5000)
   }
