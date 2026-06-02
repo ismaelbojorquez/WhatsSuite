@@ -19,6 +19,7 @@ import { recordChatAssignmentAudit } from '../infra/db/chatAssignmentAuditReposi
 import { emitToUsers, emitToRoles } from '../infra/realtime/socketHub.js';
 import { ROLES } from '../domain/user/user.js';
 import { buildMediaUrl } from '../shared/mediaUrl.js';
+import { findWarmupMessage } from './warmupMessageRegistry.js';
 
 const LOG_TAG = undefined;
 
@@ -85,6 +86,35 @@ export const handleIncomingWhatsAppMessage = async ({
   const resolvedType = messageType || (content ? Object.keys(content)[0] || 'unknown' : 'unknown');
   const hasRenderableContent = Boolean(normalizedText || media);
   const isProtocolOnly = !hasRenderableContent && !!protocolType;
+  const warmupMatch = await findWarmupMessage({
+    sessionName,
+    remoteNumber,
+    messageId,
+    tenantId,
+    text: normalizedText || ''
+  });
+  if (warmupMatch) {
+    await updateSessionSyncTracking({
+      sessionName,
+      tenantId,
+      lastSyncedAt: messageTime,
+      lastMessageId: messageId,
+      syncState: historyFlag ? 'SYNCING' : 'IDLE',
+      syncError: null
+    }).catch(() => {});
+    logger.info(
+      {
+        sessionName,
+        remoteNumber,
+        messageId,
+        direction: fromMe ? 'out' : 'in',
+        matchedBy: warmupMatch.matchedBy,
+        tag: 'WARMUP_INTERNAL_MESSAGE'
+      },
+      'Warmup WhatsApp message ignored by chat inbox'
+    );
+    return null;
+  }
 
   // Mensajes enviados por nosotros mismos (broadcast/masivos) o históricos outbound: registrar en chat cerrado sin notificaciones.
   if (fromMe) {
@@ -367,6 +397,22 @@ export const handleWhatsAppMessageUpdate = async ({
   if (!sessionName || !remoteNumber || !messageId) {
     return null;
   }
+  const warmupMatch = await findWarmupMessage({ sessionName, remoteNumber, messageId, tenantId });
+  if (warmupMatch) {
+    logger.info(
+      {
+        sessionName,
+        remoteNumber,
+        messageId,
+        status,
+        statusCode,
+        matchedBy: warmupMatch.matchedBy,
+        tag: 'WARMUP_INTERNAL_MESSAGE'
+      },
+      'Warmup WhatsApp message status ignored by chat inbox'
+    );
+    return { internal: true, warmup: true };
+  }
   const updated = await updateMessageStatus({
     sessionName,
     remoteNumber,
@@ -386,6 +432,14 @@ export const handleWhatsAppMessageUpdate = async ({
 
 export const handleWhatsAppMessageDelete = async ({ sessionName, remoteNumber, messageId, tenantId = null }) => {
   if (!sessionName || !remoteNumber || !messageId) {
+    return null;
+  }
+  const warmupMatch = await findWarmupMessage({ sessionName, remoteNumber, messageId, tenantId });
+  if (warmupMatch) {
+    logger.info(
+      { sessionName, remoteNumber, messageId, matchedBy: warmupMatch.matchedBy, tag: 'WARMUP_INTERNAL_MESSAGE' },
+      'Warmup WhatsApp message delete ignored by chat inbox'
+    );
     return null;
   }
   const deleted = await softDeleteMessage({ sessionName, remoteNumber, whatsappMessageId: messageId, tenantId });

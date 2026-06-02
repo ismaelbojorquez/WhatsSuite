@@ -13,6 +13,7 @@ import {
   auditWarmup,
   buildAlertPayload
 } from './warmupTelemetry.js';
+import { registerWarmupMessage } from './warmupMessageRegistry.js';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -102,7 +103,37 @@ export class WarmupEngine extends EventEmitter {
           });
           return { messageId: null, dryRun: true };
         }
+        await registerWarmupMessage({
+          from,
+          to,
+          text,
+          meta,
+          profile,
+          phase: 'pending'
+        });
         const res = await sendWhatsAppMessage(payload);
+        try {
+          await registerWarmupMessage({
+            from,
+            to,
+            messageId: res.messageId,
+            text,
+            meta,
+            profile,
+            phase: 'sent'
+          });
+        } catch (registryErr) {
+          this.log.warn(
+            {
+              err: registryErr,
+              from: from.sessionName,
+              to: to.phone,
+              messageId: res.messageId,
+              tag: 'WARMUP_MESSAGE_REGISTRY'
+            },
+            'Warmup message sent but final registry update failed'
+          );
+        }
         const evt = { from: from.sessionName, to: to.phone, text, meta, messageId: res.messageId, profile };
         this.emit('sent', evt);
         await recordWarmupSent({

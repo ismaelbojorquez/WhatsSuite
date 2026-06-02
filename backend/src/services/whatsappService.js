@@ -187,6 +187,9 @@ const attachEvents = (record) => {
   controller.events.on('message_update', async (payload) => {
     try {
       const updated = await handleWhatsAppMessageUpdate({ ...payload, tenantId: record.tenantId });
+      if (updated?.internal) {
+        return;
+      }
       if (updated) {
         emitToAll('message:update', {
           chatId: updated.chatId,
