@@ -4,7 +4,66 @@ import logger from '../infra/logging/logger.js';
 const ZERO_UUID = '00000000-0000-0000-0000-000000000000';
 let running = false;
 
+const ensureDashboardPartitionsForDates = async (dates) => {
+  const uniqueMonths = new Set(
+    dates
+      .filter(Boolean)
+      .map((date) => {
+        const value = date instanceof Date ? date : new Date(date);
+        if (Number.isNaN(value.getTime())) return null;
+        return `${value.getUTCFullYear()}-${value.getUTCMonth() + 1}`;
+      })
+      .filter(Boolean)
+  );
+
+  for (const monthKey of uniqueMonths) {
+    const [year, month] = monthKey.split('-').map(Number);
+    await pool.query(`
+      DO $$
+      DECLARE
+        start_date DATE := make_date(${year}, ${month}, 1);
+      BEGIN
+        IF to_regprocedure('ensure_monthly_range_partitions(regclass, text, date, date)') IS NOT NULL THEN
+          PERFORM ensure_monthly_range_partitions(
+            'dashboard_messages_daily'::regclass,
+            'dashboard_messages_daily',
+            start_date,
+            start_date
+          );
+          PERFORM ensure_monthly_range_partitions(
+            'dashboard_chats_daily'::regclass,
+            'dashboard_chats_daily',
+            start_date,
+            start_date
+          );
+        ELSIF to_regprocedure('create_dashboard_partitions(integer, integer)') IS NOT NULL THEN
+          PERFORM create_dashboard_partitions(${year}, ${month});
+        END IF;
+      END $$;
+    `);
+  }
+};
+
+const ensureMessageDailyPartitions = async () => {
+  const { rows } = await pool.query(`
+    SELECT DISTINCT COALESCE(timestamp, created_at)::date AS date_key
+    FROM chat_messages
+    WHERE COALESCE(timestamp, created_at) >= CURRENT_DATE - INTERVAL '2 days'
+  `);
+  await ensureDashboardPartitionsForDates(rows.map((row) => row.date_key));
+};
+
+const ensureChatDailyPartitions = async () => {
+  const { rows } = await pool.query(`
+    SELECT DISTINCT COALESCE(updated_at, last_message_at, created_at)::date AS date_key
+    FROM chats
+    WHERE COALESCE(updated_at, last_message_at, created_at) >= CURRENT_DATE - INTERVAL '2 days'
+  `);
+  await ensureDashboardPartitionsForDates(rows.map((row) => row.date_key));
+};
+
 const upsertMessagesDaily = async () => {
+  await ensureMessageDailyPartitions();
   await pool.query(
     `
     WITH stats AS (
@@ -37,6 +96,7 @@ const upsertMessagesDaily = async () => {
 };
 
 const upsertChatsDaily = async () => {
+  await ensureChatDailyPartitions();
   await pool.query(
     `
     WITH stats AS (
