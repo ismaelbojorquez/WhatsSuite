@@ -4,6 +4,96 @@
 
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
 
+CREATE OR REPLACE FUNCTION ensure_range_partition(
+  p_parent REGCLASS,
+  p_partition_name TEXT,
+  p_from DATE,
+  p_to DATE
+) RETURNS void AS $$
+DECLARE
+  partition_column TEXT;
+  default_partition REGCLASS;
+  range_check_name TEXT := format('%s_range_chk', p_partition_name);
+  moved_rows BIGINT;
+BEGIN
+  SELECT a.attname INTO partition_column
+  FROM pg_partitioned_table p
+  JOIN LATERAL unnest(p.partattrs) WITH ORDINALITY attrs(attnum, ord) ON true
+  JOIN pg_attribute a ON a.attrelid = p.partrelid AND a.attnum = attrs.attnum
+  WHERE p.partrelid = p_parent
+    AND attrs.ord = 1;
+
+  IF partition_column IS NULL THEN
+    RAISE EXCEPTION 'Cannot ensure partition for %, partition key is not a simple single column', p_parent::text;
+  END IF;
+
+  SELECT c.oid::regclass INTO default_partition
+  FROM pg_inherits i
+  JOIN pg_class c ON c.oid = i.inhrelid
+  WHERE i.inhparent = p_parent
+    AND pg_get_expr(c.relpartbound, c.oid) = 'DEFAULT';
+
+  BEGIN
+    EXECUTE format(
+      'CREATE TABLE IF NOT EXISTS %I PARTITION OF %s FOR VALUES FROM (%L) TO (%L)',
+      p_partition_name,
+      p_parent::text,
+      p_from,
+      p_to
+    );
+    RETURN;
+  EXCEPTION
+    WHEN duplicate_table OR invalid_object_definition THEN
+      -- The range may already be covered by partitions created by older naming schemes.
+      RETURN;
+    WHEN check_violation THEN
+      IF default_partition IS NULL THEN
+        RAISE;
+      END IF;
+  END;
+
+  EXECUTE format(
+    'CREATE TABLE %I (LIKE %s INCLUDING DEFAULTS INCLUDING STORAGE INCLUDING COMMENTS)',
+    p_partition_name,
+    p_parent::text
+  );
+  EXECUTE format(
+    'ALTER TABLE %I ADD CONSTRAINT %I CHECK (%I >= %L AND %I < %L)',
+    p_partition_name,
+    range_check_name,
+    partition_column,
+    p_from,
+    partition_column,
+    p_to
+  );
+  EXECUTE format(
+    'WITH moved AS (
+       DELETE FROM %s
+       WHERE %I >= %L AND %I < %L
+       RETURNING *
+     )
+     INSERT INTO %I SELECT * FROM moved',
+    default_partition::text,
+    partition_column,
+    p_from,
+    partition_column,
+    p_to,
+    p_partition_name
+  );
+  GET DIAGNOSTICS moved_rows = ROW_COUNT;
+
+  EXECUTE format(
+    'ALTER TABLE %s ATTACH PARTITION %I FOR VALUES FROM (%L) TO (%L)',
+    p_parent::text,
+    p_partition_name,
+    p_from,
+    p_to
+  );
+
+  RAISE NOTICE 'Moved % row(s) from % into new partition %', moved_rows, default_partition::text, p_partition_name;
+END;
+$$ LANGUAGE plpgsql;
+
 CREATE OR REPLACE FUNCTION ensure_monthly_range_partitions(
   p_parent REGCLASS,
   p_prefix TEXT,
@@ -19,19 +109,7 @@ BEGIN
     part_end := (part_start + INTERVAL '1 month')::date;
     part_name := format('%s_%s', p_prefix, to_char(part_start, 'YYYY_MM'));
 
-    BEGIN
-      EXECUTE format(
-        'CREATE TABLE IF NOT EXISTS %I PARTITION OF %s FOR VALUES FROM (%L) TO (%L)',
-        part_name,
-        p_parent::text,
-        part_start,
-        part_end
-      );
-    EXCEPTION
-      WHEN duplicate_table OR invalid_object_definition THEN
-        -- The range may already be covered by partitions created by older naming schemes.
-        NULL;
-    END;
+    PERFORM ensure_range_partition(p_parent, part_name, part_start, part_end);
 
     part_start := part_end;
   END LOOP;
@@ -53,18 +131,7 @@ BEGIN
     part_end := (part_start + INTERVAL '1 year')::date;
     part_name := format('%s_%s', p_prefix, to_char(part_start, 'YYYY'));
 
-    BEGIN
-      EXECUTE format(
-        'CREATE TABLE IF NOT EXISTS %I PARTITION OF %s FOR VALUES FROM (%L) TO (%L)',
-        part_name,
-        p_parent::text,
-        part_start,
-        part_end
-      );
-    EXCEPTION
-      WHEN duplicate_table OR invalid_object_definition THEN
-        NULL;
-    END;
+    PERFORM ensure_range_partition(p_parent, part_name, part_start, part_end);
 
     part_start := part_end;
   END LOOP;
