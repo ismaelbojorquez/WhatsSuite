@@ -62,6 +62,18 @@ const COUNTRY_OPTIONS = [
   { code: '971', label: 'Emiratos Árabes (+971)' }
 ];
 
+const TRANSIENT_WHATSAPP_STATUSES = new Set(['pending', 'connecting', 'restarting', 'pairing_code']);
+
+const resolveStableConnectionStatus = (nextStatus, previousStatus = null) => {
+  const next = normalizeWhatsAppStatus(nextStatus, '');
+  const previous = normalizeWhatsAppStatus(previousStatus, '');
+  if (!next) return previous || null;
+  if (previous === 'connected' && TRANSIENT_WHATSAPP_STATUSES.has(next)) {
+    return 'connected';
+  }
+  return next;
+};
+
 const ChatView = () => {
   const { token, logout, user } = useAuth();
   const handleApiUnauthorized = useCallback(
@@ -228,8 +240,10 @@ const ChatView = () => {
       .map(([session, status]) => [session, normalizeWhatsAppStatus(status, '')])
       .filter(([session, status]) => session && status);
     if (!entries.length) return;
-    const normalized = Object.fromEntries(entries);
     setConnectionStatusMap((prev) => {
+      const normalized = Object.fromEntries(
+        entries.map(([session, status]) => [session, resolveStableConnectionStatus(status, prev[session])])
+      );
       const next = { ...prev, ...normalized };
       connectionStatusMapRef.current = next;
       return next;
@@ -237,19 +251,24 @@ const ChatView = () => {
     setChats((prev) =>
       prev.map((c) => {
         const session = c.whatsappSessionName || c.whatsapp_session_name || c.connectionId || null;
-        if (session && normalized[session]) {
-          return { ...c, whatsappStatus: normalized[session] };
+        const rawUpdate = entries.find(([name]) => name === session)?.[1] || null;
+        if (session && rawUpdate) {
+          return { ...c, whatsappStatus: resolveStableConnectionStatus(rawUpdate, c.whatsappStatus || c.whatsapp_status) };
         }
         return c;
       })
     );
     setAvailableConnections((prev) =>
-      prev.map((c) => (c.name && normalized[c.name] ? { ...c, status: normalized[c.name] } : c))
+      prev.map((c) => {
+        const rawUpdate = c.name ? entries.find(([name]) => name === c.name)?.[1] : null;
+        return rawUpdate ? { ...c, status: resolveStableConnectionStatus(rawUpdate, c.status) } : c;
+      })
     );
     setConnections((prev) =>
       prev.map((c) => {
         const session = c.sessionName || c.name || null;
-        return session && normalized[session] ? { ...c, status: normalized[session] } : c;
+        const rawUpdate = session ? entries.find(([name]) => name === session)?.[1] : null;
+        return rawUpdate ? { ...c, status: resolveStableConnectionStatus(rawUpdate, c.status) } : c;
       })
     );
   }, []);
@@ -774,11 +793,16 @@ const ChatView = () => {
         incomingChat?.connectionStatus ||
         incomingChat?.connection_status ||
         null;
-      const knownStatus =
+      const existingStatus = existingChat?.whatsappStatus || existingChat?.whatsapp_status || null;
+      const candidateStatus =
         explicitStatus ||
-        existingChat?.whatsappStatus ||
-        existingChat?.whatsapp_status ||
+        existingStatus ||
         (sessionName ? connectionStatusMapRef.current[sessionName] : null);
+      const knownStatus = resolveStableConnectionStatus(
+        candidateStatus,
+        existingStatus ||
+        (sessionName ? connectionStatusMapRef.current[sessionName] : null)
+      );
 
       return normalizeChat({
         ...(existingChat || {}),

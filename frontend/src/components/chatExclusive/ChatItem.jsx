@@ -16,8 +16,7 @@ const avatarCache = new Map();
 const connectionPillSx = (theme, status) => {
   const palette = (() => {
     if (status === 'connected') return { bg: theme.palette.success.main, fg: theme.palette.common.white };
-    if (status === 'pending') return { bg: theme.palette.info.main, fg: theme.palette.common.white };
-    if (status === 'connecting' || status === 'restarting' || status === 'pairing_code') {
+    if (status === 'pending' || status === 'connecting' || status === 'restarting' || status === 'pairing_code') {
       return { bg: theme.palette.warning.main, fg: theme.palette.common.white };
     }
     if (status === 'invalid' || status === 'error') return { bg: theme.palette.error.main, fg: theme.palette.common.white };
