@@ -74,8 +74,11 @@ const upsertMessagesDaily = async () => {
         COUNT(*) AS total_mensajes,
         COUNT(*) FILTER (WHERE cm.direction = 'in') AS mensajes_in,
         COUNT(*) FILTER (WHERE cm.direction = 'out') AS mensajes_out,
-        COUNT(*) FILTER (WHERE (cm.content ? 'media') OR (cm.content ? 'files')) AS archivos_out,
-        COUNT(*) FILTER (WHERE (cm.content->'media'->>'type') = 'audio' OR cm.content->>'payload_type' = 'audio') AS audios_out
+        COUNT(*) FILTER (WHERE ((cm.content ? 'media') OR (cm.content ? 'files')) AND cm.direction = 'out') AS archivos_out,
+        COUNT(*) FILTER (
+          WHERE ((cm.content->'media'->>'type') = 'audio' OR cm.content->>'payload_type' = 'audio')
+            AND cm.direction = 'out'
+        ) AS audios_out
       FROM chat_messages cm
       INNER JOIN chats c ON c.id = cm.chat_id
       WHERE COALESCE(cm.timestamp, cm.created_at) >= CURRENT_DATE - INTERVAL '2 days'
@@ -99,17 +102,52 @@ const upsertChatsDaily = async () => {
   await ensureChatDailyPartitions();
   await pool.query(
     `
-    WITH stats AS (
+    WITH chat_scope AS (
       SELECT
         COALESCE(c.updated_at, c.last_message_at, c.created_at)::date AS date_key,
         COALESCE(c.queue_id, $1::uuid) AS queue_id,
         COALESCE(c.assigned_agent_id, $1::uuid) AS agent_id,
-        COUNT(*) AS total_chats,
-        COUNT(*) FILTER (WHERE UPPER(c.status) IN ('OPEN','UNASSIGNED')) AS total_abiertos,
-        COUNT(*) FILTER (WHERE UPPER(c.status) = 'CLOSED') AS total_cerrados,
-        0::numeric(12,2) AS avg_tiempo_respuesta_secs
+        c.id,
+        c.status
       FROM chats c
       WHERE COALESCE(c.updated_at, c.last_message_at, c.created_at) >= CURRENT_DATE - INTERVAL '2 days'
+    ),
+    first_inbound AS (
+      SELECT
+        cm.chat_id,
+        MIN(COALESCE(cm.timestamp, cm.created_at)) AS inbound_at
+      FROM chat_messages cm
+      WHERE cm.direction = 'in'
+        AND cm.chat_id IS NOT NULL
+        AND COALESCE(cm.timestamp, cm.created_at) >= CURRENT_DATE - INTERVAL '2 days'
+      GROUP BY cm.chat_id
+    ),
+    first_response AS (
+      SELECT
+        fi.chat_id,
+        EXTRACT(EPOCH FROM (outbound.outbound_at - fi.inbound_at)) AS response_secs
+      FROM first_inbound fi
+      JOIN LATERAL (
+        SELECT COALESCE(cm.timestamp, cm.created_at) AS outbound_at
+        FROM chat_messages cm
+        WHERE cm.chat_id = fi.chat_id
+          AND cm.direction = 'out'
+          AND COALESCE(cm.timestamp, cm.created_at) > fi.inbound_at
+        ORDER BY COALESCE(cm.timestamp, cm.created_at) ASC
+        LIMIT 1
+      ) outbound ON TRUE
+    ),
+    stats AS (
+      SELECT
+        cs.date_key,
+        cs.queue_id,
+        cs.agent_id,
+        COUNT(*) AS total_chats,
+        COUNT(*) FILTER (WHERE cs.status IN ('OPEN','UNASSIGNED','open','unassigned')) AS total_abiertos,
+        COUNT(*) FILTER (WHERE cs.status IN ('CLOSED','closed')) AS total_cerrados,
+        COALESCE(AVG(fr.response_secs), 0)::numeric(12,2) AS avg_tiempo_respuesta_secs
+      FROM chat_scope cs
+      LEFT JOIN first_response fr ON fr.chat_id = cs.id
       GROUP BY 1,2,3
     )
     INSERT INTO dashboard_chats_daily (date_key, queue_id, agent_id, status, total_chats, total_abiertos, total_cerrados, avg_tiempo_respuesta_secs)

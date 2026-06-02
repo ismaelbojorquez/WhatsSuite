@@ -3,6 +3,7 @@ import logger from '../../infra/logging/logger.js';
 
 const dashboardCache = new Map();
 const dashboardCacheTtlMs = 60_000;
+const ZERO_UUID = '00000000-0000-0000-0000-000000000000';
 
 const cacheKey = (scope, start, end) => `${scope}:${start}:${end}`;
 
@@ -77,43 +78,68 @@ const enrichOverview = (data, { start, end }) => {
   };
 };
 
-const isEmptyOverview = (data) => {
-  if (!data) return true;
-  const numeric = [
-    data.total_mensajes,
-    data.mensajes_entrantes,
-    data.mensajes_salientes,
-    data.archivos_enviados,
-    data.audios_enviados,
-    data.total_chats_abiertos,
-    data.total_chats_cerrados
-  ];
-  return numeric.every((v) => v === null || Number(v) === 0);
-};
-
-const fallbackOverview = async ({ start, endExclusive }) => {
+const getLiveOverview = async ({ start, endExclusive }) => {
   const { rows } = await pool.query(
     `
-    WITH msgs AS (
+    WITH msg_scope AS (
+      SELECT
+        m.*,
+        COALESCE(m.timestamp, m.created_at) AS message_at
+      FROM chat_messages m
+      WHERE COALESCE(m.timestamp, m.created_at) >= $1::date
+        AND COALESCE(m.timestamp, m.created_at) < $2::date
+    ),
+    msgs AS (
       SELECT
         COUNT(*)::bigint AS total_mensajes,
         COUNT(*) FILTER (WHERE direction = 'in')::bigint AS mensajes_entrantes,
         COUNT(*) FILTER (WHERE direction = 'out')::bigint AS mensajes_salientes,
         COUNT(*) FILTER (WHERE ((content ? 'media') OR (content ? 'files')) AND direction = 'out')::bigint AS archivos_enviados,
         COUNT(*) FILTER (WHERE ((content->'media'->>'type') = 'audio' OR content->>'payload_type' = 'audio') AND direction = 'out')::bigint AS audios_enviados
-      FROM chat_messages
-      WHERE COALESCE(timestamp, created_at) >= $1::date
-        AND COALESCE(timestamp, created_at) < $2::date
+      FROM msg_scope
+    ),
+    chat_scope AS (
+      SELECT c.*
+      FROM chats c
+      WHERE c.status IN ('OPEN','UNASSIGNED','open','unassigned')
+         OR (c.created_at >= $1::date AND c.created_at < $2::date)
+         OR (c.updated_at >= $1::date AND c.updated_at < $2::date)
+         OR (c.last_message_at >= $1::date AND c.last_message_at < $2::date)
+         OR (c.closed_at >= $1::date AND c.closed_at < $2::date)
+         OR EXISTS (SELECT 1 FROM msg_scope m WHERE m.chat_id = c.id)
     ),
     chats AS (
       SELECT
         COUNT(*)::bigint AS total_chats,
-        COUNT(*) FILTER (WHERE UPPER(status) IN ('OPEN','UNASSIGNED'))::bigint AS total_chats_abiertos,
-        COUNT(*) FILTER (WHERE UPPER(status) = 'CLOSED')::bigint AS total_chats_cerrados,
-        AVG(EXTRACT(EPOCH FROM (updated_at - created_at)))::numeric(12,2) AS tiempo_respuesta_promedio
-      FROM chats
-      WHERE COALESCE(updated_at, last_message_at, created_at) >= $1::date
-        AND COALESCE(updated_at, last_message_at, created_at) < $2::date
+        COUNT(*) FILTER (WHERE status IN ('OPEN','UNASSIGNED','open','unassigned'))::bigint AS total_chats_abiertos,
+        COUNT(*) FILTER (WHERE status IN ('CLOSED','closed'))::bigint AS total_chats_cerrados
+      FROM chat_scope
+    ),
+    first_inbound AS (
+      SELECT chat_id, MIN(message_at) AS inbound_at
+      FROM msg_scope
+      WHERE direction = 'in'
+        AND chat_id IS NOT NULL
+      GROUP BY chat_id
+    ),
+    first_response AS (
+      SELECT
+        fi.chat_id,
+        EXTRACT(EPOCH FROM (outbound.outbound_at - fi.inbound_at)) AS response_secs
+      FROM first_inbound fi
+      JOIN LATERAL (
+        SELECT COALESCE(o.timestamp, o.created_at) AS outbound_at
+        FROM chat_messages o
+        WHERE o.chat_id = fi.chat_id
+          AND o.direction = 'out'
+          AND COALESCE(o.timestamp, o.created_at) > fi.inbound_at
+        ORDER BY COALESCE(o.timestamp, o.created_at) ASC
+        LIMIT 1
+      ) outbound ON TRUE
+    ),
+    response AS (
+      SELECT COALESCE(AVG(response_secs),0)::numeric(12,2) AS tiempo_respuesta_promedio
+      FROM first_response
     )
     SELECT
       msgs.total_mensajes,
@@ -124,15 +150,15 @@ const fallbackOverview = async ({ start, endExclusive }) => {
       chats.total_chats,
       chats.total_chats_abiertos,
       chats.total_chats_cerrados,
-      chats.tiempo_respuesta_promedio
-    FROM msgs, chats
+      response.tiempo_respuesta_promedio
+    FROM msgs, chats, response
   `,
     [start, endExclusive]
   );
   return rows[0] || {};
 };
 
-const fallbackTimeseries = async ({ start, endExclusive }) => {
+const getLiveTimeseries = async ({ start, endExclusive }) => {
   const { rows } = await pool.query(
     `
     SELECT
@@ -153,104 +179,115 @@ const fallbackTimeseries = async ({ start, endExclusive }) => {
   return rows;
 };
 
-const fallbackChatsByQueue = async ({ start, endExclusive }) => {
+const getLiveChatsByQueue = async ({ start, endExclusive }) => {
   const { rows } = await pool.query(
     `
+    WITH msg_scope AS (
+      SELECT
+        m.*,
+        COALESCE(m.timestamp, m.created_at) AS message_at,
+        COALESCE(c.queue_id, $3::uuid) AS queue_bucket
+      FROM chat_messages m
+      LEFT JOIN chats c ON c.id = m.chat_id
+      WHERE COALESCE(m.timestamp, m.created_at) >= $1::date
+        AND COALESCE(m.timestamp, m.created_at) < $2::date
+    ),
+    chat_scope AS (
+      SELECT
+        c.*,
+        COALESCE(c.queue_id, $3::uuid) AS queue_bucket
+      FROM chats c
+      WHERE c.status IN ('OPEN','UNASSIGNED','open','unassigned')
+         OR (c.created_at >= $1::date AND c.created_at < $2::date)
+         OR (c.updated_at >= $1::date AND c.updated_at < $2::date)
+         OR (c.last_message_at >= $1::date AND c.last_message_at < $2::date)
+         OR (c.closed_at >= $1::date AND c.closed_at < $2::date)
+         OR EXISTS (SELECT 1 FROM msg_scope m WHERE m.chat_id = c.id)
+    ),
+    first_inbound AS (
+      SELECT chat_id, MIN(message_at) AS inbound_at
+      FROM msg_scope
+      WHERE direction = 'in'
+        AND chat_id IS NOT NULL
+      GROUP BY chat_id
+    ),
+    first_response AS (
+      SELECT
+        COALESCE(c.queue_id, $3::uuid) AS queue_bucket,
+        EXTRACT(EPOCH FROM (outbound.outbound_at - fi.inbound_at)) AS response_secs
+      FROM first_inbound fi
+      JOIN chats c ON c.id = fi.chat_id
+      JOIN LATERAL (
+        SELECT COALESCE(o.timestamp, o.created_at) AS outbound_at
+        FROM chat_messages o
+        WHERE o.chat_id = fi.chat_id
+          AND o.direction = 'out'
+          AND COALESCE(o.timestamp, o.created_at) > fi.inbound_at
+        ORDER BY COALESCE(o.timestamp, o.created_at) ASC
+        LIMIT 1
+      ) outbound ON TRUE
+    ),
+    msg_by_queue AS (
+      SELECT
+        queue_bucket,
+        COUNT(*)::bigint AS total_mensajes
+      FROM msg_scope
+      GROUP BY queue_bucket
+    ),
+    chat_by_queue AS (
+      SELECT
+        queue_bucket,
+        COUNT(DISTINCT id) FILTER (WHERE status IN ('OPEN','UNASSIGNED','open','unassigned'))::bigint AS total_abiertos,
+        COUNT(DISTINCT id) FILTER (WHERE status IN ('CLOSED','closed'))::bigint AS total_cerrados,
+        COUNT(DISTINCT id)::bigint AS total_chats
+      FROM chat_scope
+      GROUP BY queue_bucket
+    ),
+    response_by_queue AS (
+      SELECT
+        queue_bucket,
+        COALESCE(AVG(response_secs),0)::numeric(12,2) AS tiempo_respuesta_promedio
+      FROM first_response
+      GROUP BY queue_bucket
+    ),
+    queue_buckets AS (
+      SELECT queue_bucket FROM msg_by_queue
+      UNION
+      SELECT queue_bucket FROM chat_by_queue
+      UNION
+      SELECT queue_bucket FROM response_by_queue
+    )
     SELECT
-      c.queue_id,
+      NULLIF(qb.queue_bucket, $3::uuid) AS queue_id,
       COALESCE(q.name, 'Sin cola') AS queue_name,
-      COUNT(DISTINCT c.id) FILTER (WHERE UPPER(c.status) IN ('OPEN','UNASSIGNED'))::bigint AS total_abiertos,
-      COUNT(DISTINCT c.id) FILTER (WHERE UPPER(c.status) = 'CLOSED')::bigint AS total_cerrados,
-      COUNT(DISTINCT c.id)::bigint AS total_chats,
-      COUNT(m.*)::bigint AS total_mensajes,
-      AVG(EXTRACT(EPOCH FROM (c.updated_at - c.created_at)))::numeric(12,2) AS tiempo_respuesta_promedio,
-      ROUND((COUNT(DISTINCT c.id) FILTER (WHERE UPPER(c.status) = 'CLOSED')::numeric / NULLIF(COUNT(DISTINCT c.id), 0)) * 100, 2) AS tasa_cierre,
-      ROUND(COUNT(m.*)::numeric / NULLIF(COUNT(DISTINCT c.id), 0), 2) AS mensajes_por_chat
-    FROM chats c
-    LEFT JOIN queues q ON q.id = c.queue_id
-    LEFT JOIN chat_messages m
-      ON m.chat_id = c.id
-     AND COALESCE(m.timestamp, m.created_at) >= $1::date
-     AND COALESCE(m.timestamp, m.created_at) < $2::date
-    WHERE COALESCE(c.updated_at, c.last_message_at, c.created_at) >= $1::date
-      AND COALESCE(c.updated_at, c.last_message_at, c.created_at) < $2::date
-    GROUP BY c.queue_id, q.name
+      COALESCE(cb.total_abiertos, 0)::bigint AS total_abiertos,
+      COALESCE(cb.total_cerrados, 0)::bigint AS total_cerrados,
+      COALESCE(cb.total_chats, 0)::bigint AS total_chats,
+      COALESCE(mb.total_mensajes, 0)::bigint AS total_mensajes,
+      COALESCE(rb.tiempo_respuesta_promedio, 0)::numeric(12,2) AS tiempo_respuesta_promedio,
+      ROUND((COALESCE(cb.total_cerrados, 0)::numeric / NULLIF(COALESCE(cb.total_chats, 0), 0)) * 100, 2) AS tasa_cierre,
+      ROUND(COALESCE(mb.total_mensajes, 0)::numeric / NULLIF(COALESCE(cb.total_chats, 0), 0), 2) AS mensajes_por_chat
+    FROM queue_buckets qb
+    LEFT JOIN queues q ON q.id = NULLIF(qb.queue_bucket, $3::uuid)
+    LEFT JOIN chat_by_queue cb ON cb.queue_bucket = qb.queue_bucket
+    LEFT JOIN msg_by_queue mb ON mb.queue_bucket = qb.queue_bucket
+    LEFT JOIN response_by_queue rb ON rb.queue_bucket = qb.queue_bucket
     ORDER BY total_mensajes DESC
   `,
-    [start, endExclusive]
+    [start, endExclusive, ZERO_UUID]
   );
   return rows;
 };
 
 export const getOverviewMetrics = async ({ fecha_inicio, fecha_fin }) => {
   const { start, end, endExclusive } = ensureDates(fecha_inicio, fecha_fin);
-  const { rows } = await pool.query(
-    `
-    WITH msgs AS (
-      SELECT
-        COALESCE(SUM(total_mensajes),0)::bigint AS total_mensajes,
-        COALESCE(SUM(mensajes_in),0)::bigint AS mensajes_entrantes,
-        COALESCE(SUM(mensajes_out),0)::bigint AS mensajes_salientes,
-        COALESCE(SUM(archivos_out),0)::bigint AS archivos_enviados,
-        COALESCE(SUM(audios_out),0)::bigint AS audios_enviados
-      FROM dashboard_messages_daily
-      WHERE date_key BETWEEN $1 AND $2
-    ),
-    chats AS (
-      SELECT
-        COALESCE(SUM(total_chats),0)::bigint AS total_chats,
-        COALESCE(SUM(total_abiertos),0)::bigint AS total_chats_abiertos,
-        COALESCE(SUM(total_cerrados),0)::bigint AS total_chats_cerrados,
-        COALESCE(AVG(avg_tiempo_respuesta_secs),0)::numeric(12,2) AS tiempo_respuesta_promedio
-      FROM dashboard_chats_daily
-      WHERE date_key BETWEEN $1 AND $2
-    )
-    SELECT
-      msgs.total_mensajes,
-      msgs.mensajes_entrantes,
-      msgs.mensajes_salientes,
-      msgs.archivos_enviados,
-      msgs.audios_enviados,
-      chats.total_chats,
-      chats.total_chats_abiertos,
-      chats.total_chats_cerrados,
-      chats.tiempo_respuesta_promedio
-    FROM msgs, chats
-  `,
-    [start, end]
-  );
-  let result = rows[0] || {};
-  if (isEmptyOverview(result)) {
-    logger.warn({ start, end, tag: 'DASHBOARD_FALLBACK' }, 'Falling back to live aggregates for overview');
-    result = await fallbackOverview({ start, endExclusive });
-  }
+  const result = await getLiveOverview({ start, endExclusive });
   return enrichOverview(result, { start, end });
 };
 
 export const getMessagesTimeseries = async ({ fecha_inicio, fecha_fin }) => {
-  const { start, end, endExclusive } = ensureDates(fecha_inicio, fecha_fin);
-  const { rows } = await pool.query(
-    `
-    SELECT
-      date_key,
-      COALESCE(SUM(total_mensajes),0)::bigint AS total_mensajes,
-      COALESCE(SUM(mensajes_in),0)::bigint AS mensajes_entrantes,
-      COALESCE(SUM(mensajes_out),0)::bigint AS mensajes_salientes,
-      COALESCE(SUM(archivos_out),0)::bigint AS archivos_enviados,
-      COALESCE(SUM(audios_out),0)::bigint AS audios_enviados
-    FROM dashboard_messages_daily
-    WHERE date_key BETWEEN $1 AND $2
-    GROUP BY date_key
-    ORDER BY date_key ASC
-  `,
-    [start, end]
-  );
-  let data = rows;
-  if (!data.length) {
-    logger.warn({ start, end, tag: 'DASHBOARD_FALLBACK' }, 'Falling back to live aggregates for timeseries');
-    data = await fallbackTimeseries({ start, endExclusive });
-  }
-  return data;
+  const { start, endExclusive } = ensureDates(fecha_inicio, fecha_fin);
+  return getLiveTimeseries({ start, endExclusive });
 };
 
 export const getChatsByQueue = async ({ fecha_inicio, fecha_fin }) => {
@@ -258,47 +295,7 @@ export const getChatsByQueue = async ({ fecha_inicio, fecha_fin }) => {
   const cached = await getDashboardCache('chats', start, end);
   if (cached) return cached;
 
-  const { rows } = await pool.query(
-    `
-    WITH msg AS (
-      SELECT queue_id,
-             COALESCE(SUM(total_mensajes),0)::bigint AS total_mensajes
-      FROM dashboard_messages_daily
-      WHERE date_key BETWEEN $1 AND $2
-      GROUP BY queue_id
-    ),
-    chat AS (
-      SELECT queue_id,
-             COALESCE(SUM(total_abiertos),0)::bigint AS total_abiertos,
-             COALESCE(SUM(total_cerrados),0)::bigint AS total_cerrados,
-             COALESCE(SUM(total_chats),0)::bigint AS total_chats,
-             COALESCE(AVG(avg_tiempo_respuesta_secs),0)::numeric(12,2) AS avg_trs
-      FROM dashboard_chats_daily
-      WHERE date_key BETWEEN $1 AND $2
-      GROUP BY queue_id
-    )
-    SELECT
-      COALESCE(chat.queue_id, msg.queue_id) AS queue_id,
-      COALESCE(q.name, 'Sin cola') AS queue_name,
-      COALESCE(chat.total_abiertos, 0)::bigint AS total_abiertos,
-      COALESCE(chat.total_cerrados, 0)::bigint AS total_cerrados,
-      COALESCE(chat.total_chats, 0)::bigint AS total_chats,
-      COALESCE(msg.total_mensajes, 0)::bigint AS total_mensajes,
-      COALESCE(chat.avg_trs, 0)::numeric(12,2) AS tiempo_respuesta_promedio,
-      ROUND((COALESCE(chat.total_cerrados, 0)::numeric / NULLIF(COALESCE(chat.total_chats, 0), 0)) * 100, 2) AS tasa_cierre,
-      ROUND(COALESCE(msg.total_mensajes, 0)::numeric / NULLIF(COALESCE(chat.total_chats, 0), 0), 2) AS mensajes_por_chat
-    FROM chat
-    FULL OUTER JOIN msg ON msg.queue_id = chat.queue_id
-    LEFT JOIN queues q ON q.id = COALESCE(chat.queue_id, msg.queue_id)
-    ORDER BY total_mensajes DESC
-  `,
-    [start, end]
-  );
-  let data = rows;
-  if (!data.length) {
-    logger.warn({ start, end, tag: 'DASHBOARD_FALLBACK' }, 'Falling back to live aggregates for chats by queue');
-    data = await fallbackChatsByQueue({ start, endExclusive });
-  }
+  const data = await getLiveChatsByQueue({ start, endExclusive });
   await setDashboardCache('chats', start, end, data);
   return data;
 };
@@ -416,12 +413,27 @@ export const getDrilldown = async ({ fecha_inicio, fecha_fin, level }) => {
     case 'status': {
       const { rows } = await pool.query(
         `
+        WITH msg_scope AS (
+          SELECT DISTINCT m.chat_id
+          FROM chat_messages m
+          WHERE COALESCE(m.timestamp, m.created_at) >= $1::date
+            AND COALESCE(m.timestamp, m.created_at) < $2::date
+            AND m.chat_id IS NOT NULL
+        ),
+        chat_scope AS (
+          SELECT c.*
+          FROM chats c
+          WHERE c.status IN ('OPEN','UNASSIGNED','open','unassigned')
+             OR (c.created_at >= $1::date AND c.created_at < $2::date)
+             OR (c.updated_at >= $1::date AND c.updated_at < $2::date)
+             OR (c.last_message_at >= $1::date AND c.last_message_at < $2::date)
+             OR (c.closed_at >= $1::date AND c.closed_at < $2::date)
+             OR EXISTS (SELECT 1 FROM msg_scope m WHERE m.chat_id = c.id)
+        )
         SELECT
           COALESCE(UPPER(c.status), 'SIN ESTADO') AS label,
           COUNT(*)::bigint AS value
-        FROM chats c
-        WHERE COALESCE(c.updated_at, c.last_message_at, c.created_at) >= $1::date
-          AND COALESCE(c.updated_at, c.last_message_at, c.created_at) < $2::date
+        FROM chat_scope c
         GROUP BY label
         ORDER BY value DESC
       `,
