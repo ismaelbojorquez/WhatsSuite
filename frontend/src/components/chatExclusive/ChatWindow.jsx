@@ -18,6 +18,7 @@ import VideoPreviewModal from './VideoPreviewModal.jsx';
 import QuickReplyComposer from './QuickReplyComposer.jsx';
 import QuickReplySuggestions from './QuickReplySuggestions.jsx';
 import { useAuth } from '../../context/AuthContext.jsx';
+import { getWhatsAppStatusColor, normalizeWhatsAppStatus } from '../../utils/whatsappStatus.js';
 
 /* =========================
    CONSTANTES
@@ -33,14 +34,6 @@ const ALLOWED_TYPES = [
   'audio/ogg',
   'application/pdf'
 ];
-
-const STATUS_COLOR = {
-  UNASSIGNED: 'info',
-  OPEN: 'primary',
-  ASSIGNED: 'primary',
-  CLOSED: 'default',
-  BLOCKED: 'error'
-};
 
 const statusBg = (theme, status) => {
   switch (status) {
@@ -130,6 +123,8 @@ const ChatWindow = ({
   const quickReplyCacheRef = useRef(new Map());
   const qrTimerRef = useRef(null);
   const [sendingQuickReply, setSendingQuickReply] = useState(false);
+  const connectionName = chat?.whatsappSessionName || chat?.whatsapp_session_name || 'Sin conexion';
+  const connectionStatus = normalizeWhatsAppStatus(chat?.whatsappStatus || chat?.whatsapp_status, 'unknown');
 
   useEffect(() => {
     setQuickReplyDraft(null);
@@ -577,8 +572,8 @@ const ChatWindow = ({
             </Typography>
             <Chip
               size="small"
-              label={chat.status}
-              color={STATUS_COLOR[chat.status] || 'default'}
+              label={connectionName}
+              color={getWhatsAppStatusColor(connectionStatus)}
               variant="outlined"
             />
             <Typography variant="caption" color="text.secondary">
