@@ -5,7 +5,7 @@ import { alpha, Card, CardContent, Stack, Typography, Box } from '@mui/material'
  * Premium wrapper para gráficas con iconografía y gradiente.
  * @param {{ icon?: React.ReactNode, title: string, subtitle?: string, children: React.ReactNode, hint?: string }} props
  */
-const ChartCard = memo(({ icon, title, subtitle, children, hint = 'Click para ver detalle' }) => {
+const ChartCard = memo(({ icon, title, subtitle, children, hint = null }) => {
   return (
     <Card
       elevation={0}
@@ -56,9 +56,11 @@ const ChartCard = memo(({ icon, title, subtitle, children, hint = 'Click para ve
             )}
           </Box>
           <Box sx={{ flex: 1 }} />
-          <Typography variant="caption" color="text.secondary" sx={{ opacity: 0.8 }}>
-            {hint}
-          </Typography>
+          {hint ? (
+            <Typography variant="caption" color="text.secondary" sx={{ opacity: 0.8 }}>
+              {hint}
+            </Typography>
+          ) : null}
         </Stack>
         <Box sx={{ position: 'relative' }}>{children}</Box>
       </CardContent>

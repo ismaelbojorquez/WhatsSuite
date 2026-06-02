@@ -1,10 +1,13 @@
-import { memo } from 'react';
+import { memo, useMemo } from 'react';
 import {
+  Box,
+  Button,
   Dialog,
   DialogTitle,
   DialogContent,
   DialogActions,
-  Button,
+  LinearProgress,
+  Skeleton,
   Stack,
   Typography,
   Divider,
@@ -12,38 +15,98 @@ import {
 } from '@mui/material';
 import InsightsRoundedIcon from '@mui/icons-material/InsightsRounded';
 
-/**
- * Modal de drill-down para gráficas.
- * @param {{ open: boolean, datum: { label: string, value: number, source?: string } | null, onClose: ()=>void }} props
- */
-const ChartDrilldownModal = memo(({ open, datum, onClose }) => {
-  const label = datum?.label || 'Sin selección';
+const LEVELS = [
+  { value: 'agent', label: 'Agente' },
+  { value: 'connection', label: 'Conexion' },
+  { value: 'hour', label: 'Hora' },
+  { value: 'queue', label: 'Cola' },
+  { value: 'status', label: 'Estado' },
+  { value: 'message_type', label: 'Tipo' }
+];
+
+const formatNumber = (value) => Number(value || 0).toLocaleString('es-MX');
+
+const ChartDrilldownModal = memo(({ open, datum, level = 'agent', loading = false, onClose, onFilterChange }) => {
+  const label = datum?.label || 'Sin seleccion';
   const value = Number(datum?.value || 0);
+  const rows = datum?.data || [];
+  const maxValue = useMemo(() => Math.max(...rows.map((row) => Number(row.value || 0)), 1), [rows]);
 
   return (
     <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth>
       <DialogTitle>
-        Detalle de <strong>{label}</strong>
+        <Stack spacing={0.5}>
+          <Typography variant="h6" fontWeight={850}>
+            Detalle de {label}
+          </Typography>
+          <Typography variant="caption" color="text.secondary">
+            {datum?.source || 'Desglose operativo'}
+          </Typography>
+        </Stack>
       </DialogTitle>
       <DialogContent dividers>
         <Stack spacing={2}>
-          <Stack direction="row" spacing={1} alignItems="center">
+          <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
             <Chip label={datum?.source || 'Total'} color="primary" variant="outlined" icon={<InsightsRoundedIcon />} />
-            <Typography variant="h4" fontWeight={800} sx={{ lineHeight: 1 }}>
-              {value.toLocaleString()}
+            <Typography variant="h4" fontWeight={900} sx={{ lineHeight: 1 }}>
+              {formatNumber(value)}
             </Typography>
-            <Typography variant="body1" color="text.secondary">
-              mensajes
-            </Typography>
+          </Stack>
+
+          <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+            {LEVELS.map((item) => (
+              <Button
+                key={item.value}
+                size="small"
+                variant={level === item.value ? 'contained' : 'outlined'}
+                onClick={() => onFilterChange?.(item.value)}
+              >
+                {item.label}
+              </Button>
+            ))}
           </Stack>
 
           <Divider />
 
-          <Stack spacing={1}>
+          {loading ? (
+            <Stack spacing={1}>
+              {[0, 1, 2, 3, 4].map((item) => (
+                <Skeleton key={item} height={34} />
+              ))}
+            </Stack>
+          ) : rows.length ? (
+            <Stack spacing={1.25}>
+              {rows.slice(0, 12).map((row, index) => {
+                const rowValue = Number(row.value || 0);
+                return (
+                  <Box key={`${row.label}-${index}`}>
+                    <Stack direction="row" justifyContent="space-between" spacing={1}>
+                      <Typography variant="body2" noWrap>
+                        {row.label}
+                      </Typography>
+                      <Typography variant="body2" fontWeight={800} noWrap>
+                        {formatNumber(rowValue)}
+                      </Typography>
+                    </Stack>
+                    <LinearProgress
+                      variant="determinate"
+                      value={(rowValue / maxValue) * 100}
+                      sx={{
+                        height: 7,
+                        borderRadius: 999,
+                        mt: 0.65,
+                        '& .MuiLinearProgress-bar': { borderRadius: 999 }
+                      }}
+                    />
+                  </Box>
+                );
+              })}
+            </Stack>
+          ) : (
             <Typography variant="body2" color="text.secondary">
-              Selecciona un punto en la gráfica para ver su detalle. Integra aquí el desglose específico desde backend según la selección.
+              Sin datos
             </Typography>
-          </Stack>
+          )}
         </Stack>
       </DialogContent>
       <DialogActions>
