@@ -32,6 +32,9 @@ if (env.http.requireHttps) {
 app.use(
   pinoHttp({
     logger,
+    autoLogging: {
+      ignore: (req) => req.url?.startsWith('/api/v1/health/')
+    },
     customProps: (req) => ({ requestId: req.id }),
     customSuccessMessage: () => 'request completed',
     customErrorMessage: () => 'request failed'

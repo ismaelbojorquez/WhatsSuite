@@ -132,6 +132,14 @@ const splitSqlStatements = (sql) => {
   return statements;
 };
 
+const describeSqlStatement = (statement) => {
+  const firstSqlLine = statement
+    .split('\n')
+    .map((line) => line.trim())
+    .find((line) => line && !line.startsWith('--'));
+  return (firstSqlLine || 'SQL statement').replace(/\s+/g, ' ').slice(0, 160);
+};
+
 const ensureMigrationsTable = async () => {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -224,10 +232,22 @@ const applyMigration = async (file) => {
   };
   let inTransaction = false;
   try {
+    logger.info({ migration: file, transaction: !runWithoutTransaction }, 'Aplicando migración');
     if (runWithoutTransaction) {
       const statements = splitSqlStatements(sql);
-      for (const statement of statements) {
+      logger.info({ migration: file, statements: statements.length }, 'Migración sin transacción dividida en sentencias');
+      for (const [index, statement] of statements.entries()) {
+        const statementNumber = index + 1;
+        const statementPreview = describeSqlStatement(statement);
+        logger.info(
+          { migration: file, statement: statementNumber, statements: statements.length, statementPreview },
+          'Ejecutando sentencia de migración'
+        );
         await client.query(statement);
+        logger.info(
+          { migration: file, statement: statementNumber, statements: statements.length },
+          'Sentencia de migración aplicada'
+        );
       }
     } else {
       await client.query('BEGIN');
@@ -278,6 +298,7 @@ export const runPendingMigrations = async () => {
     logger.info({ migrations: files.length }, 'Sin migraciones pendientes');
     return { applied: 0 };
   }
+  logger.info({ pending: pending.length, migrations: pending }, 'Migraciones pendientes detectadas');
   for (const file of pending) {
     await applyMigration(file);
   }
