@@ -1,6 +1,5 @@
 import {
   Badge,
-  Chip,
   ListItemButton,
   Stack,
   Typography,
@@ -13,6 +12,39 @@ import { useAuth } from '../../context/AuthContext.jsx';
 import { normalizeWhatsAppStatus } from '../../utils/whatsappStatus.js';
 
 const avatarCache = new Map();
+
+const connectionPillSx = (theme, status) => {
+  const palette = (() => {
+    if (status === 'connected') return { bg: theme.palette.success.main, fg: theme.palette.common.white };
+    if (status === 'pending') return { bg: theme.palette.info.main, fg: theme.palette.common.white };
+    if (status === 'connecting' || status === 'restarting' || status === 'pairing_code') {
+      return { bg: theme.palette.warning.main, fg: theme.palette.common.white };
+    }
+    if (status === 'invalid' || status === 'error') return { bg: theme.palette.error.main, fg: theme.palette.common.white };
+    return { bg: theme.palette.action.selected, fg: theme.palette.text.secondary };
+  })();
+
+  return {
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
+    maxWidth: 116,
+    height: 18,
+    px: 1,
+    borderRadius: 999,
+    fontSize: 11,
+    fontWeight: 700,
+    lineHeight: '18px',
+    whiteSpace: 'nowrap',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    bgcolor: `${palette.bg} !important`,
+    color: `${palette.fg} !important`,
+    border: `1px solid ${palette.bg}`,
+    boxShadow: 'none'
+  };
+};
 
 const ChatItem = ({ chat, selected, onSelect, unread = 0 }) => {
   const { token } = useAuth();
@@ -159,29 +191,9 @@ const ChatItem = ({ chat, selected, onSelect, unread = 0 }) => {
             )}
 
             {/* Conexión (antes status) */}
-            <Chip
-              size="small"
-              label={connectionLabel}
-              sx={(theme) => {
-                const palette = (() => {
-                  if (connectionStatus === 'connected') return theme.palette.success;
-                  if (connectionStatus === 'pending') return theme.palette.info;
-                  if (connectionStatus === 'connecting' || connectionStatus === 'restarting' || connectionStatus === 'pairing_code') {
-                    return theme.palette.warning;
-                  }
-                  if (connectionStatus === 'invalid' || connectionStatus === 'error') return theme.palette.error;
-                  return null;
-                })();
-                return {
-                  height: 18,
-                  fontSize: 11,
-                  bgcolor: palette ? palette.main : theme.palette.action.selected,
-                  color: palette ? palette.contrastText : theme.palette.text.secondary,
-                  borderColor: palette ? palette.main : theme.palette.divider,
-                  '& .MuiChip-label': { px: 1 }
-                };
-              }}
-            />
+            <Box component="span" title={connectionLabel} sx={(theme) => connectionPillSx(theme, connectionStatus)}>
+              {connectionLabel}
+            </Box>
           </Stack>
 
           {/* Línea 2 */}
