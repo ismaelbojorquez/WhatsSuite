@@ -42,6 +42,7 @@ import { ApiError } from '../api/client.js';
 import { getEventsSocket } from '../lib/eventsSocket.js';
 import createContactsApi from '../api/contacts.api.js';
 import { normalizePhoneNumber } from '../utils/phone.js';
+import { isWhatsAppConnected, normalizeWhatsAppStatus } from '../utils/whatsappStatus.js';
 
 const COUNTRY_OPTIONS = [
   { code: '52', label: 'México (+52)' },
@@ -146,6 +147,7 @@ const ChatView = () => {
   const chatsRef = useRef([]);
   const quickReplyCacheRef = useRef(new Map());
   const [connectionStatusMap, setConnectionStatusMap] = useState({});
+  const connectionStatusMapRef = useRef({});
   const [newChatOpen, setNewChatOpen] = useState(false);
   const [newChatForm, setNewChatForm] = useState({
     sessionName: '',
@@ -156,7 +158,7 @@ const ChatView = () => {
   const [newChatLoading, setNewChatLoading] = useState(false);
   const [availableConnections, setAvailableConnections] = useState([]);
   const connectedConnections = useMemo(
-    () => availableConnections.filter((c) => (c.status || '').toLowerCase() === 'connected'),
+    () => availableConnections.filter((c) => isWhatsAppConnected(c.status)),
     [availableConnections]
   );
   const [connectionsLoading, setConnectionsLoading] = useState(false);
@@ -204,6 +206,10 @@ const ChatView = () => {
   }, [chats]);
 
   useEffect(() => {
+    connectionStatusMapRef.current = connectionStatusMap;
+  }, [connectionStatusMap]);
+
+  useEffect(() => {
     quickReplyCacheRef.current.clear();
   }, [token]);
   useEffect(() => {
@@ -218,10 +224,16 @@ const ChatView = () => {
   const [contactSaving, setContactSaving] = useState(false);
 
   const applyConnectionStatusUpdates = useCallback((updates = {}) => {
-    const entries = Object.entries(updates || {}).filter(([session, status]) => session && status);
+    const entries = Object.entries(updates || {})
+      .map(([session, status]) => [session, normalizeWhatsAppStatus(status, '')])
+      .filter(([session, status]) => session && status);
     if (!entries.length) return;
     const normalized = Object.fromEntries(entries);
-    setConnectionStatusMap((prev) => ({ ...prev, ...normalized }));
+    setConnectionStatusMap((prev) => {
+      const next = { ...prev, ...normalized };
+      connectionStatusMapRef.current = next;
+      return next;
+    });
     setChats((prev) =>
       prev.map((c) => {
         const session = c.whatsappSessionName || c.whatsapp_session_name || c.connectionId || null;
@@ -229,6 +241,15 @@ const ChatView = () => {
           return { ...c, whatsappStatus: normalized[session] };
         }
         return c;
+      })
+    );
+    setAvailableConnections((prev) =>
+      prev.map((c) => (c.name && normalized[c.name] ? { ...c, status: normalized[c.name] } : c))
+    );
+    setConnections((prev) =>
+      prev.map((c) => {
+        const session = c.sessionName || c.name || null;
+        return session && normalized[session] ? { ...c, status: normalized[session] } : c;
       })
     );
   }, []);
@@ -498,7 +519,7 @@ const ChatView = () => {
       const list = Array.isArray(response?.connections) ? response.connections : Array.isArray(response) ? response : [];
       const normalized = list.map((s) => ({
         name: s.sessionName || s.session_name || s.name,
-        status: (s.status || s.state || '').toLowerCase() || 'unknown',
+        status: normalizeWhatsAppStatus(s.status || s.state),
         queues: Array.isArray(s.queues)
           ? s.queues
               .filter((q) => q && q.id && q.name)
@@ -565,7 +586,7 @@ const ChatView = () => {
       const chat = await chatService.createChat({ sessionName, contact, queueId });
       if (chat?.id) {
         const connStatus = availableConnections.find((c) => c.name === sessionName)?.status || null;
-        const normalized = normalizeChat({ ...chat, whatsappStatus: chat.whatsappStatus || connStatus });
+        const normalized = mergeChatWithKnownConnection({ ...chat, whatsappStatus: chat.whatsappStatus || connStatus });
         if (connStatus) {
           applyConnectionStatusUpdates({ [sessionName]: connStatus });
         }
@@ -671,8 +692,13 @@ const ChatView = () => {
       if (!chat) return chat;
       const queueId = chat.queueId || chat.queue_id || chat.queue?.id || null;
       const sessionName = chat.whatsappSessionName || chat.whatsapp_session_name || chat.connectionId || null;
-      const whatsappStatus =
-        chat.whatsappStatus || chat.whatsapp_status || (sessionName ? connectionStatusMap[sessionName] : null);
+      const rawWhatsappStatus =
+        chat.whatsappStatus ||
+        chat.whatsapp_status ||
+        chat.connectionStatus ||
+        chat.connection_status ||
+        (sessionName ? connectionStatusMapRef.current[sessionName] : null);
+      const whatsappStatus = normalizeWhatsAppStatus(rawWhatsappStatus, null);
       const phone = chat.remoteNumber || chat.remote_number || chat.contact || '';
       const phoneNormalized = normalizePhoneSafe(phone);
       const contactInfo = phoneNormalized ? contactBook[phoneNormalized] : null;
@@ -723,7 +749,45 @@ const ChatView = () => {
         remoteName: displayName
       };
     },
-    [connectionStatusMap, contactBook, normalizePhoneSafe]
+    [contactBook, normalizePhoneSafe]
+  );
+
+  const mergeChatWithKnownConnection = useCallback(
+    (incomingChat, existingChat = null) => {
+      if (!incomingChat && !existingChat) return null;
+      const incomingSession =
+        incomingChat?.whatsappSessionName ||
+        incomingChat?.whatsapp_session_name ||
+        incomingChat?.connectionId ||
+        incomingChat?.connection_id ||
+        null;
+      const existingSession =
+        existingChat?.whatsappSessionName ||
+        existingChat?.whatsapp_session_name ||
+        existingChat?.connectionId ||
+        existingChat?.connection_id ||
+        null;
+      const sessionName = incomingSession || existingSession;
+      const explicitStatus =
+        incomingChat?.whatsappStatus ||
+        incomingChat?.whatsapp_status ||
+        incomingChat?.connectionStatus ||
+        incomingChat?.connection_status ||
+        null;
+      const knownStatus =
+        explicitStatus ||
+        existingChat?.whatsappStatus ||
+        existingChat?.whatsapp_status ||
+        (sessionName ? connectionStatusMapRef.current[sessionName] : null);
+
+      return normalizeChat({
+        ...(existingChat || {}),
+        ...(incomingChat || {}),
+        whatsappSessionName: sessionName,
+        whatsappStatus: normalizeWhatsAppStatus(knownStatus, null)
+      });
+    },
+    [normalizeChat]
   );
 
   useEffect(() => {
@@ -785,7 +849,7 @@ const ChatView = () => {
 
         const normalizedConns = (connRes || []).map((c) => ({
           sessionName: c.whatsapp_session_name || c.sessionName || c.name,
-          status: c.status || c.connectionStatus || c.whatsapp_status || null
+          status: normalizeWhatsAppStatus(c.status || c.connectionStatus || c.whatsapp_status, '')
         }));
         setConnections(normalizedConns);
         const statusUpdates = {};
@@ -816,7 +880,8 @@ const ChatView = () => {
         limit: 100
       });
       const itemsRaw = data?.items || data || [];
-      const items = itemsRaw.map(normalizeChat);
+      const previousById = new Map((chatsRef.current || []).map((c) => [c.id, c]));
+      const items = itemsRaw.map((c) => mergeChatWithKnownConnection(c, previousById.get(c.id)));
       preloadContactsForChats(items).catch(() => {});
       // Actualizar mapa de estado de conexión si viene en la respuesta
       const statusUpdates = {};
@@ -833,7 +898,7 @@ const ChatView = () => {
       if (append) {
         setChats((prev) => {
           const map = new Map((prev || []).map((c) => [c.id, normalizeChat(c)]));
-          visible.forEach((c) => map.set(c.id, { ...map.get(c.id), ...c }));
+          visible.forEach((c) => map.set(c.id, mergeChatWithKnownConnection(c, map.get(c.id))));
           return Array.from(map.values());
         });
       } else {
@@ -997,7 +1062,8 @@ const ChatView = () => {
   const handleReassignSuccess = useCallback(
     (updatedChat) => {
       if (!updatedChat) return false;
-      const normalized = normalizeChat(updatedChat);
+      const existing = chatsRef.current.find((c) => c.id === updatedChat.id) || null;
+      const normalized = mergeChatWithKnownConnection(updatedChat, existing);
       const keepVisible =
         role !== 'AGENTE' ||
         normalized.assignedUserId === user?.id ||
@@ -1023,7 +1089,7 @@ const ChatView = () => {
       }
       return keepVisible;
     },
-    [normalizeChat, role, user?.id, activeChatId]
+    [mergeChatWithKnownConnection, role, user?.id, activeChatId]
   );
 
   const handleSend = async (payload) => {
@@ -1278,13 +1344,18 @@ const ChatView = () => {
       let statusChange = null;
 
       if (chat) {
-        const normalizedChat = normalizeChat(chat);
+        const existing = chatsRef.current.find((c) => c.id === chat.id) || null;
+        const normalizedChat = mergeChatWithKnownConnection(chat, existing);
         const visible = isChatVisibleCurrent(normalizedChat) && matchesTabCurrent(normalizedChat);
         setChats((prev) => {
           if (!visible) return prev.filter((c) => c.id !== normalizedChat.id);
           const exists = prev.find((c) => c.id === normalizedChat.id);
           statusChange = { prev: exists?.status, next: normalizedChat.status };
-          if (exists) return prev.map((c) => (c.id === normalizedChat.id ? { ...c, ...normalizedChat } : c));
+          if (exists) {
+            return prev.map((c) =>
+              c.id === normalizedChat.id ? mergeChatWithKnownConnection(normalizedChat, c) : c
+            );
+          }
           return [normalizedChat, ...prev];
         });
         if (!visible) {
@@ -1330,7 +1401,8 @@ const ChatView = () => {
     socket.on('message:update', handleStatusUpdate);
 
     socket.on('chat:new', (chat) => {
-      const normalizedChat = normalizeChat(chat);
+      const existing = chatsRef.current.find((c) => c.id === chat?.id) || null;
+      const normalizedChat = mergeChatWithKnownConnection(chat, existing);
       if (normalizedChat?.status) adjustSummary(null, normalizedChat.status);
       if (!isChatVisibleCurrent(normalizedChat) || !matchesTabCurrent(normalizedChat)) return;
       setChats((prev) => {
@@ -1364,29 +1436,31 @@ const ChatView = () => {
       if (sessionName && sessionStatus) {
         applyConnectionStatusUpdates({ [sessionName]: sessionStatus });
       }
-      const visible = isChatVisibleCurrent(chat) && matchesTabCurrent(chat);
+      const existingChat = chatsRef.current.find((c) => c.id === chat.id) || null;
+      const normalizedChat = mergeChatWithKnownConnection(chat, existingChat);
+      const visible = isChatVisibleCurrent(normalizedChat) && matchesTabCurrent(normalizedChat);
       setChats((prev) => {
         const exists = prev.find((c) => c.id === chat.id);
-        if (exists?.status && exists.status !== chat.status) {
-          adjustSummary(exists.status, chat.status);
+        if (exists?.status && exists.status !== normalizedChat.status) {
+          adjustSummary(exists.status, normalizedChat.status);
         }
         if (!visible) return prev.filter((c) => c.id !== chat.id);
-        if (exists) return prev.map((c) => (c.id === chat.id ? normalizeChat(chat) : c));
-        adjustSummary(null, chat.status);
-        return [normalizeChat(chat), ...prev];
+        if (exists) return prev.map((c) => (c.id === chat.id ? mergeChatWithKnownConnection(normalizedChat, c) : c));
+        adjustSummary(null, normalizedChat.status);
+        return [normalizedChat, ...prev];
       });
       if (!visible && activeChatIdRef.current === chat.id) {
         setActiveChatId(null);
         if (role === 'AGENTE') setActiveTab('OPEN');
       }
       // Si el chat activo cambia de estado, navega a la pestaña correcta (no mover agentes a CLOSED)
-      if (activeChatIdRef.current === chat.id && chat?.status) {
+      if (activeChatIdRef.current === chat.id && normalizedChat?.status) {
         const targetTab =
           role === 'AGENTE'
             ? 'OPEN'
-            : chat.status === 'UNASSIGNED'
+            : normalizedChat.status === 'UNASSIGNED'
               ? 'UNASSIGNED'
-              : chat.status === 'CLOSED'
+              : normalizedChat.status === 'CLOSED'
                 ? 'CLOSED'
                 : 'OPEN';
         if (targetTab !== activeTabRef.current) {

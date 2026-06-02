@@ -16,6 +16,7 @@ import { ApiError } from '../api/client.js';
 import { useAuth } from './AuthContext.jsx';
 import { createAuditService } from '../services/audit.service.js';
 import { useNotify } from './NotifyContext.jsx';
+import { normalizeWhatsAppStatus } from '../utils/whatsappStatus.js';
 
 const WhatsappSessionsContext = createContext(null);
 
@@ -110,7 +111,7 @@ export const WhatsappSessionsProvider = ({ children }) => {
       if (deletedSessions.current.has(sessionId)) return;
       try {
         const statusResp = await getSessionStatusApi(apiClientInstance, sessionId);
-        const status = statusResp.status ?? 'unknown';
+        const status = normalizeWhatsAppStatus(statusResp.status);
         const patch = {
           status,
           lastConnectedAt: statusResp.lastConnectedAt || null,
@@ -185,7 +186,7 @@ export const WhatsappSessionsProvider = ({ children }) => {
           await createSessionApi(apiClientInstance, sessionId);
           statusResp = await getSessionStatusApi(apiClientInstance, sessionId);
         }
-        const status = statusResp?.status ?? 'unknown';
+        const status = normalizeWhatsAppStatus(statusResp?.status);
         const patch = {
           status,
           qr: statusResp.qr || null,
@@ -230,7 +231,7 @@ export const WhatsappSessionsProvider = ({ children }) => {
           try {
             await createSessionApi(apiClientInstance, sessionId);
             const statusResp = await getSessionStatusApi(apiClientInstance, sessionId);
-            const status = statusResp.status ?? 'unknown';
+            const status = normalizeWhatsAppStatus(statusResp.status);
             dispatch({
               type: 'SET_SESSION',
               id: sessionId,
@@ -278,7 +279,7 @@ export const WhatsappSessionsProvider = ({ children }) => {
           id: sessionId,
           patch: {
             session: sessionId,
-            status: s.status ?? 'unknown',
+            status: normalizeWhatsAppStatus(s.status),
             lastConnectedAt: s.lastConnectedAt || null,
             updatedAt: s.updatedAt || null,
             hasConnected: Boolean(s.lastConnectedAt),
@@ -354,7 +355,7 @@ export const WhatsappSessionsProvider = ({ children }) => {
           patch: {
             qr: qrResp.qr || null,
             qrBase64: qrResp.qrBase64 || null,
-            status: hasQr ? 'pending' : (qrResp.status || 'pending'),
+            status: hasQr ? 'pending' : normalizeWhatsAppStatus(qrResp.status, 'pending'),
             hasStoredKeys: Boolean(qrResp.hasStoredKeys),
             loading: false
           }

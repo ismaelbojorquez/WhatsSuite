@@ -1,16 +1,10 @@
 import { Autocomplete, Chip, Stack, TextField, Typography, Box } from '@mui/material';
-
-const statusColor = (status) => {
-  const normalized = (status || '').toLowerCase();
-  if (normalized === 'connected') return 'success';
-  if (normalized === 'pending' || normalized === 'connecting') return 'warning';
-  return 'error';
-};
+import { getWhatsAppStatusColor, normalizeWhatsAppStatus } from '../utils/whatsappStatus.js';
 
 const BroadcastConnectionSelector = ({ connections = [], value = [], onChange, disabled = false }) => {
   const mapped = connections.map((c) => ({
     label: c.session || c.session_name || c.id || 'default',
-    status: c.status || 'unknown'
+    status: normalizeWhatsAppStatus(c.status)
   }));
   const selected = mapped.filter((opt) => value.includes(opt.label));
 
@@ -32,7 +26,7 @@ const BroadcastConnectionSelector = ({ connections = [], value = [], onChange, d
         renderInput={(params) => <TextField {...params} label="Selecciona conexiones" placeholder="session-01" />}
         renderOption={(props, option) => (
           <Box component="li" {...props} key={option.label} sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-            <Chip size="small" color={statusColor(option.status)} label={option.status || 'desconocido'} />
+            <Chip size="small" color={getWhatsAppStatusColor(option.status, { unknown: 'error' })} label={option.status || 'desconocido'} />
             <Typography variant="body2">{option.label}</Typography>
           </Box>
         )}
@@ -42,7 +36,7 @@ const BroadcastConnectionSelector = ({ connections = [], value = [], onChange, d
               {...getTagProps({ index })}
               key={option.label}
               label={option.label}
-              color={statusColor(option.status)}
+              color={getWhatsAppStatusColor(option.status, { unknown: 'error' })}
               size="small"
             />
           ))

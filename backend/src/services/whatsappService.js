@@ -82,11 +82,34 @@ const resolveHistoryDays = async () => {
   return cachedHistoryDays;
 };
 
+const persistSessionRuntimeStatus = async (sessionName, status, tenantId = null) => {
+  const name = normalizeSessionName(sessionName);
+  const resolvedTenant = tenantId || await getTenantIdForSession(name, tenantId);
+  const normalized = typeof status === 'string' ? status.toLowerCase() : 'pending';
+  const persistedStatus =
+    normalized === 'connected'
+      ? 'connected'
+      : normalized === 'disconnected' || normalized === 'invalid'
+        ? 'disconnected'
+        : 'pending';
+  await pool
+    .query(
+      `UPDATE whatsapp_sessions
+       SET status = $2,
+           updated_at = NOW()
+       WHERE session_name = $1
+         AND ($3::uuid IS NULL OR tenant_id = $3)`,
+      [name, persistedStatus, resolvedTenant]
+    )
+    .catch(() => {});
+};
+
 const attachEvents = (record) => {
   const { controller } = record;
   controller.events.on('qr', ({ qr, qrBase64 }) => {
     record.lastQr = { qr, qrBase64, at: new Date().toISOString() };
     record.lastStatus = 'pending';
+    emitToAll('whatsapp:status', { sessionId: record.sessionName, status: record.lastStatus });
     recordWhatsAppAudit({
       sessionName: record.sessionName,
       event: 'qr_issued',
@@ -99,6 +122,11 @@ const attachEvents = (record) => {
   controller.events.on('status', ({ status, reason, reasonCode }) => {
     record.lastStatus = status || record.lastStatus || 'unknown';
     record.lastStatusReason = reason || reasonCode || null;
+    emitToAll('whatsapp:status', {
+      sessionId: record.sessionName,
+      status: record.lastStatus,
+      reason: record.lastStatusReason
+    });
     if (status === 'connected') {
       record.lastConnectedAt = new Date().toISOString();
       recordWhatsAppAudit({
@@ -126,6 +154,7 @@ const attachEvents = (record) => {
   controller.events.on('pairing_code', ({ code }) => {
     record.lastPairingCode = { code, at: new Date().toISOString() };
     record.lastStatus = 'pairing_code';
+    emitToAll('whatsapp:status', { sessionId: record.sessionName, status: record.lastStatus });
     recordWhatsAppAudit({
       sessionName: record.sessionName,
       event: 'pairing_code_requested',
@@ -350,6 +379,8 @@ export const requestPairingCode = async (sessionName, phoneNumber, { userId = nu
   if (record) {
     record.lastPairingCode = { code, at: new Date().toISOString() };
     record.lastStatus = 'pairing_code';
+    await persistSessionRuntimeStatus(name, record.lastStatus, record.tenantId || tenantId);
+    emitToAll('whatsapp:status', { sessionId: name, status: record.lastStatus });
   }
   await recordWhatsAppAudit({
     sessionName: name,
@@ -446,6 +477,8 @@ export const reconnectSession = async (
     existing.lastPairingCode = null;
     existing.lastStatus = 'connecting';
     existing.lastStatusReason = null;
+    await persistSessionRuntimeStatus(name, existing.lastStatus, existing.tenantId || tenantId);
+    emitToAll('whatsapp:status', { sessionId: name, status: existing.lastStatus });
     existing.controller = controller;
     attachEvents(existing);
     sessions.set(name, existing);
@@ -555,6 +588,8 @@ export const disconnectSession = async (sessionName, { userId = null, ip = null,
   record.lastStatus = 'disconnected';
   record.lastStatusReason = 'manual_disconnect';
   sessions.set(name, record);
+  await persistSessionRuntimeStatus(name, record.lastStatus, record.tenantId || tenantId);
+  emitToAll('whatsapp:status', { sessionId: name, status: record.lastStatus, reason: record.lastStatusReason });
   await recordWhatsAppAudit({
     sessionName: name,
     event: 'session_disconnected',

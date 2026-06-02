@@ -4,6 +4,7 @@ import HourglassEmptyIcon from '@mui/icons-material/HourglassEmpty';
 import SyncIcon from '@mui/icons-material/Sync';
 import ErrorIcon from '@mui/icons-material/Error';
 import HelpOutlineIcon from '@mui/icons-material/HelpOutline';
+import { getWhatsAppStatusColor, getWhatsAppStatusLabel, normalizeWhatsAppStatus } from '../../utils/whatsappStatus.js';
 
 const STATUS_CONFIG = {
   connected: {
@@ -40,11 +41,13 @@ const STATUS_CONFIG = {
     label: 'Error',
     color: 'error',
     icon: <ErrorIcon fontSize="small" />
+  },
+  pairing_code: {
+    label: 'Pairing code',
+    color: 'warning',
+    icon: <SyncIcon fontSize="small" />
   }
 };
-
-const normalizeStatus = (status) =>
-  typeof status === 'string' ? status.toLowerCase().trim() : 'unknown';
 
 const WhatsAppStatusBadge = ({
   status,
@@ -52,11 +55,11 @@ const WhatsAppStatusBadge = ({
   size = 'small',
   showSpinner = true
 }) => {
-  const key = normalizeStatus(status);
+  const key = normalizeWhatsAppStatus(status);
   const cfg = STATUS_CONFIG[key];
 
-  const label = cfg?.label || 'Desconocido';
-  const color = cfg?.color || 'default';
+  const label = cfg?.label || getWhatsAppStatusLabel(status);
+  const color = cfg?.color || getWhatsAppStatusColor(status);
   const icon = cfg?.icon;
 
   return (

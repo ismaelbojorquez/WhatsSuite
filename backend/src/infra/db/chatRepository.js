@@ -59,6 +59,14 @@ const encodeCursor = (row) => {
 const mapChat = (row) => ({
   id: row.id,
   whatsappSessionName: row.whatsapp_session_name,
+  whatsappStatus:
+    typeof (row.whatsapp_status || row.connection_status) === 'string'
+      ? (row.whatsapp_status || row.connection_status).toLowerCase()
+      : row.whatsapp_status || row.connection_status || null,
+  connectionStatus:
+    typeof (row.whatsapp_status || row.connection_status) === 'string'
+      ? (row.whatsapp_status || row.connection_status).toLowerCase()
+      : row.whatsapp_status || row.connection_status || null,
   remoteNumber: row.remote_number,
   remoteJid: row.remote_jid,
   contactAvatar: row.remote_avatar_url,
@@ -101,7 +109,14 @@ export const getChatById = async (id, { useCache = true } = {}) => {
     const cached = await getCachedChat(id);
     if (cached) return cached;
   }
-  const { rows } = await pool.query('SELECT * FROM chats WHERE id = $1 LIMIT 1', [id]);
+  const { rows } = await pool.query(
+    `SELECT c.*, ws.status AS whatsapp_status
+     FROM chats c
+     LEFT JOIN whatsapp_sessions ws ON ws.session_name = c.whatsapp_session_name
+     WHERE c.id = $1
+     LIMIT 1`,
+    [id]
+  );
   const chat = rows[0] ? mapChat(rows[0]) : null;
   if (chat) await cacheChat(chat);
   return chat;
@@ -110,8 +125,10 @@ export const getChatById = async (id, { useCache = true } = {}) => {
 export const getChatBySessionAndRemote = async (sessionName, remoteNumber) => {
   await ensureChatSchema();
   const { rows } = await pool.query(
-    `SELECT * FROM chats
-     WHERE whatsapp_session_name = $1 AND remote_number = $2
+    `SELECT c.*, ws.status AS whatsapp_status
+     FROM chats c
+     LEFT JOIN whatsapp_sessions ws ON ws.session_name = c.whatsapp_session_name
+     WHERE c.whatsapp_session_name = $1 AND c.remote_number = $2
      LIMIT 1`,
     [sessionName, remoteNumber]
   );
@@ -130,20 +147,22 @@ export const findOpenChatBySession = async ({
   await ensureChatSchema();
   const exec = executorFor(client);
   const params = [tenantId, sessionName];
-  const lock = forUpdate ? ' FOR UPDATE' : '';
+  const lock = forUpdate ? ' FOR UPDATE OF c' : '';
   let where = `
-    tenant_id = $1
-    AND whatsapp_session_name = $2
-    AND status = 'OPEN'
+    c.tenant_id = $1
+    AND c.whatsapp_session_name = $2
+    AND c.status = 'OPEN'
   `;
   if (remoteNumber) {
     params.push(remoteNumber);
-    where += ` AND remote_number = $${params.length}`;
+    where += ` AND c.remote_number = $${params.length}`;
   }
   const { rows } = await exec.query(
-    `SELECT * FROM chats
+    `SELECT c.*, ws.status AS whatsapp_status
+     FROM chats c
+     LEFT JOIN whatsapp_sessions ws ON ws.session_name = c.whatsapp_session_name
      WHERE ${where}
-     ORDER BY updated_at DESC
+     ORDER BY c.updated_at DESC
      LIMIT 1${lock}`,
     params
   );
@@ -160,20 +179,22 @@ export const findLatestClosedChatBySession = async ({
   await ensureChatSchema();
   const exec = executorFor(client);
   const params = [tenantId, sessionName];
-  const lock = forUpdate ? ' FOR UPDATE' : '';
+  const lock = forUpdate ? ' FOR UPDATE OF c' : '';
   let where = `
-    tenant_id = $1
-    AND whatsapp_session_name = $2
-    AND status = 'CLOSED'
+    c.tenant_id = $1
+    AND c.whatsapp_session_name = $2
+    AND c.status = 'CLOSED'
   `;
   if (remoteNumber) {
     params.push(remoteNumber);
-    where += ` AND remote_number = $${params.length}`;
+    where += ` AND c.remote_number = $${params.length}`;
   }
   const { rows } = await exec.query(
-    `SELECT * FROM chats
+    `SELECT c.*, ws.status AS whatsapp_status
+     FROM chats c
+     LEFT JOIN whatsapp_sessions ws ON ws.session_name = c.whatsapp_session_name
      WHERE ${where}
-     ORDER BY updated_at DESC, created_at DESC
+     ORDER BY c.updated_at DESC, c.created_at DESC
      LIMIT 1${lock}`,
     params
   );
@@ -633,9 +654,10 @@ export const listChatsByVisibility = async (user, statuses = undefined) => {
 
   const params = [];
   let sql = `
-    SELECT c.*, u.full_name AS assigned_user_name, u.email AS assigned_user_email
+    SELECT c.*, u.full_name AS assigned_user_name, u.email AS assigned_user_email, ws.status AS whatsapp_status
     FROM chats c
     LEFT JOIN users u ON u.id = c.assigned_user_id
+    LEFT JOIN whatsapp_sessions ws ON ws.session_name = c.whatsapp_session_name
     WHERE UPPER(c.status) = ANY($1)
   `;
   params.push(filterStatuses);
@@ -755,10 +777,12 @@ export const listChatsByVisibilityCursor = async ({ user, status, limit = 50, cu
     WITH scoped AS (
       SELECT c.*, COALESCE(c.updated_at, c.created_at) AS sort_at,
              u.full_name AS assigned_user_name, u.email AS assigned_user_email,
-             q.name AS queue_name
+             q.name AS queue_name,
+             ws.status AS whatsapp_status
       FROM chats c
       LEFT JOIN users u ON u.id = c.assigned_user_id
       LEFT JOIN queues q ON q.id = c.queue_id
+      LEFT JOIN whatsapp_sessions ws ON ws.session_name = c.whatsapp_session_name
       WHERE ${filters.join(' AND ')}
     )
     SELECT * FROM scoped
@@ -820,10 +844,11 @@ export const listChatsByPhoneForExport = async ({ user, phoneCandidates = [], li
 
   const { rows } = await pool.query(
     `
-    SELECT c.*, u.full_name AS assigned_user_name, u.email AS assigned_user_email, q.name AS queue_name
+    SELECT c.*, u.full_name AS assigned_user_name, u.email AS assigned_user_email, q.name AS queue_name, ws.status AS whatsapp_status
     FROM chats c
     LEFT JOIN users u ON u.id = c.assigned_user_id
     LEFT JOIN queues q ON q.id = c.queue_id
+    LEFT JOIN whatsapp_sessions ws ON ws.session_name = c.whatsapp_session_name
     WHERE ${filters.join(' AND ')}
     ORDER BY COALESCE(c.last_message_at, c.updated_at, c.created_at) DESC, c.id DESC
     LIMIT $${params.length}

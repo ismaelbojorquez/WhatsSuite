@@ -539,7 +539,7 @@ export const listConnectionsForUserService = async (user) => {
   // Para asegurar que los estados sean los más frescos, intenta obtener /status por sesión si sigue pendiente.
   const enriched = await Promise.all(
     connections.map(async (c) => {
-      let status = liveStatusMap.get(c.sessionName) || c.status || null;
+      let status = liveStatusMap.get(c.sessionName) || (typeof c.status === 'string' ? c.status.toLowerCase() : c.status) || null;
       if (!status || status === 'pending' || status === 'connecting') {
         try {
           const st = await getStatusForSession(c.sessionName);

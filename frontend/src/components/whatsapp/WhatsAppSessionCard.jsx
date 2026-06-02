@@ -16,9 +16,9 @@ import Chip from '@mui/material/Chip';
 import AccessTimeIcon from '@mui/icons-material/AccessTime';
 import WhatsAppStatusBadge from './WhatsAppStatusBadge.jsx';
 import { formatCountdownClock, getCountdownRemainingMs } from '../../utils/countdown.js';
+import { isWhatsAppConnected, normalizeWhatsAppStatus } from '../../utils/whatsappStatus.js';
 
-const normalizeStatus = (status) => (typeof status === 'string' ? status.toLowerCase().trim() : '');
-const isConnected = (s) => normalizeStatus(s.status) === 'connected';
+const isConnected = (s) => isWhatsAppConnected(s.status);
 const hasEverConnected = (s) => Boolean(s.hasConnected || s.lastConnectedAt);
 
 const WhatsAppSessionCard = ({
@@ -41,7 +41,7 @@ const WhatsAppSessionCard = ({
   const sessionId = session.session || session.id;
   const connected = isConnected(session);
   const everConnected = hasEverConnected(session);
-  const normalizedStatus = normalizeStatus(session.status);
+  const normalizedStatus = normalizeWhatsAppStatus(session.status, '');
   const waitingQr = normalizedStatus === 'pending' || normalizedStatus === 'connecting';
 
   const canShowQr = !connected;

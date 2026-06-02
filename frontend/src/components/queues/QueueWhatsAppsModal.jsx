@@ -17,6 +17,7 @@ import {
   Chip
 } from '@mui/material';
 import DeleteIcon from '@mui/icons-material/Delete';
+import { getWhatsAppStatusColor, normalizeWhatsAppStatus } from '../../utils/whatsappStatus.js';
 
 const QueueWhatsAppsModal = ({
   open,
@@ -137,14 +138,8 @@ const QueueWhatsAppsModal = ({
                     </Typography>
                     <Chip
                       size="small"
-                      label={s.status}
-                      color={
-                        s.status === 'CONNECTED'
-                          ? 'success'
-                          : s.status === 'PENDING'
-                          ? 'warning'
-                          : 'default'
-                      }
+                      label={normalizeWhatsAppStatus(s.status)}
+                      color={getWhatsAppStatusColor(s.status)}
                     />
                   </Stack>
                 </MenuItem>

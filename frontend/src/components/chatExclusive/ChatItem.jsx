@@ -10,6 +10,7 @@ import {
 import { alpha } from '@mui/material/styles';
 import { useEffect, useMemo, useState } from 'react';
 import { useAuth } from '../../context/AuthContext.jsx';
+import { getWhatsAppStatusColor } from '../../utils/whatsappStatus.js';
 
 const STATUS_COLOR = {
   UNASSIGNED: 'warning',
@@ -27,13 +28,7 @@ const ChatItem = ({ chat, selected, onSelect, unread = 0 }) => {
 
   const queueLabel = chat.queueName || chat.queue || 'Sin cola';
   const agentLabel = chat.assignedUserName || 'Sin asignar';
-  const connectionStatus = (chat.whatsappStatus || chat.whatsapp_status || '').toUpperCase();
-  const statusColor =
-    connectionStatus === 'CONNECTED'
-      ? 'success'
-      : connectionStatus === 'DISCONNECTED'
-        ? 'default'
-        : 'warning';
+  const statusColor = getWhatsAppStatusColor(chat.whatsappStatus || chat.whatsapp_status);
   const connectionLabel = chat.whatsappSessionName || chat.whatsapp_session_name || 'Sin conexión';
   const avatarUrl =
     chat.contactAvatar ||
