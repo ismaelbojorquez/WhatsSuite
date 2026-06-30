@@ -228,7 +228,10 @@ export const createPostgresAuthState = async (sessionName = 'default') => {
     resetState: async () => {
       creds = initAuthCreds();
       keys = {};
-      await persistState(name, { creds, keys, status: 'pending', replace: true });
+      const persisted = await persistState(name, { creds, keys, status: 'pending', replace: true });
+      creds = persisted.creds;
+      keys = persisted.keys;
+      return persisted;
     },
     getKeysSnapshot: () => keys
   };

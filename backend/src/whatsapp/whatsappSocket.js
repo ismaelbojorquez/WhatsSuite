@@ -252,6 +252,7 @@ export const createWhatsAppSocket = async (
   let restarting = false;
   let resyncRunning = false;
   let reconnectAttempts = 0;
+  let loggedOutQrRestarted = false;
 
   const logDiscard = ({ reason, messageId = null, remoteNumber = null, remoteJid = null, extra = {} }) => {
     logger.info({ sessionName, messageId, remoteNumber, remoteJid, reason, tag: LOG_TAG, ...extra }, 'Inbound message IGNORED');
@@ -357,6 +358,7 @@ export const createWhatsAppSocket = async (
         await markSyncState({ syncState: 'SYNCING', lastConnectAt: connectedAt, syncError: null });
         await recordSyncAudit('RECONNECT_DETECTED', { at: connectedAt });
         reconnectAttempts = 0;
+        loggedOutQrRestarted = false;
         events.emit('status', { sessionName, status: 'connected' });
         logger.info({ sessionName, tag: LOG_TAG }, 'WhatsApp connection open');
         historyQueue.enqueue(() => performIncrementalResync());
@@ -397,23 +399,46 @@ export const createWhatsAppSocket = async (
           }
         }
 
-        if (reasonCode === DisconnectReason.loggedOut) {
-          try {
-            await resetState();
-            await setSessionStatus(sessionName, 'pending', { tenantId: sessionContext.tenantId });
-          } catch (err) {
-            logger.error({ err, sessionName }, 'Failed to reset auth state after loggedOut');
-          }
+      if (reasonCode === DisconnectReason.loggedOut) {
+        let resetSucceeded = false;
+        try {
+          const reset = await resetState();
+          state.creds = reset.creds;
+          authState.creds = reset.creds;
+          authKeysSnapshot = reset.keys || {};
+          resetSucceeded = true;
+          reconnectAttempts = 0;
+          await setSessionStatus(sessionName, 'pending', { tenantId: sessionContext.tenantId });
+        } catch (err) {
+          logger.error({ err, sessionName }, 'Failed to reset auth state after loggedOut');
+        }
+
+        if (!resetSucceeded) {
           events.emit('status', {
             sessionName,
             status: 'invalid',
             reasonCode,
             reason: reasonMessage
           });
-          logger.warn({ sessionName, reasonCode, reasonKey, reasonMessage, tag: LOG_TAG }, 'WhatsApp session logged out, resetting state');
-          await restartSocket('loggedOut');
           return;
         }
+
+        events.emit('status', {
+          sessionName,
+          status: 'pending',
+          reasonCode,
+          reason: reasonMessage
+        });
+        logger.warn(
+          { sessionName, reasonCode, reasonKey, reasonMessage, tag: LOG_TAG },
+          'WhatsApp session logged out; auth reset and QR scan required'
+        );
+        if (!loggedOutQrRestarted) {
+          loggedOutQrRestarted = true;
+          await restartSocket('loggedOutReset');
+        }
+        return;
+      }
 
         if (reasonCode === DisconnectReason.connectionLost) {
           logger.warn(
