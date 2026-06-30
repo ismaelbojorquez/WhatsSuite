@@ -41,6 +41,48 @@ const encodeCursor = (row) => {
   return Buffer.from(JSON.stringify(payload)).toString('base64');
 };
 
+const resolveConnectionCandidates = async (sessionName, connectionId = null) => {
+  const candidates = new Set([connectionId, sessionName].filter(Boolean).map(String));
+  if (!sessionName) return Array.from(candidates);
+
+  const { rows } = await pool.query(
+    `SELECT connection_id FROM whatsapp_sessions WHERE session_name = $1 LIMIT 1`,
+    [sessionName]
+  );
+  if (rows[0]?.connection_id) candidates.add(String(rows[0].connection_id));
+  return Array.from(candidates);
+};
+
+export const findMessageByDedupeKey = async ({
+  sessionName = null,
+  connectionId = null,
+  whatsappMessageId,
+  tenantId = null
+}) => {
+  if (!whatsappMessageId) return null;
+  const connectionCandidates = await resolveConnectionCandidates(sessionName, connectionId);
+  if (!connectionCandidates.length && !tenantId) return null;
+
+  const params = [String(whatsappMessageId).toLowerCase()];
+  let sql = `
+    SELECT *
+    FROM chat_messages
+    WHERE LOWER(whatsapp_message_id) = $1
+  `;
+  if (tenantId) {
+    params.push(tenantId);
+    sql += ` AND tenant_id = $${params.length}`;
+  }
+  if (connectionCandidates.length) {
+    params.push(connectionCandidates);
+    sql += ` AND COALESCE(connection_id::text, whatsapp_session_name::text) = ANY($${params.length}::text[])`;
+  }
+  sql += ' ORDER BY timestamp DESC NULLS LAST, created_at DESC LIMIT 1';
+
+  const { rows } = await pool.query(sql, params);
+  return rows[0] ? mapMessage(rows[0]) : null;
+};
+
 export const findMessageByUniqueKey = async ({ sessionName, remoteNumber, whatsappMessageId, timestamp = null, tenantId = null }) => {
   if (!sessionName || !remoteNumber || !whatsappMessageId) return null;
   const params = [sessionName, remoteNumber, whatsappMessageId];
@@ -60,7 +102,8 @@ export const findMessageByUniqueKey = async ({ sessionName, remoteNumber, whatsa
   }
   sql += ' LIMIT 1';
   const { rows } = await pool.query(sql, params);
-  return rows[0] ? mapMessage(rows[0]) : null;
+  if (rows[0]) return mapMessage(rows[0]);
+  return findMessageByDedupeKey({ sessionName, whatsappMessageId, tenantId });
 };
 
 export const findMessageByWhatsappId = async (whatsappMessageId, tenantId = null) => {
@@ -160,10 +203,35 @@ export const insertMessage = async ({
 
   sql += `) ${valuesSql}) RETURNING *`;
 
-  const { rows } = await pool.query(sql, params);
-  const msg = mapMessage(rows[0]);
-  await invalidateChat(chatId);
-  return msg;
+  try {
+    const { rows } = await pool.query(sql, params);
+    const msg = mapMessage(rows[0]);
+    await invalidateChat(chatId);
+    return msg;
+  } catch (err) {
+    if (err?.code === '23505' && whatsappMessageId) {
+      const existing = await findMessageByDedupeKey({
+        sessionName: whatsappSessionName,
+        connectionId: resolvedConnectionId,
+        whatsappMessageId,
+        tenantId: resolvedTenant
+      });
+      if (existing) {
+        logger.info(
+          {
+            chatId,
+            sessionName: whatsappSessionName,
+            connectionId: resolvedConnectionId,
+            whatsappMessageId,
+            tag: 'CHAT_MESSAGE_DEDUPE_HIT'
+          },
+          'Duplicate WhatsApp message insert ignored'
+        );
+        return existing;
+      }
+    }
+    throw err;
+  }
 };
 
 export const updateMessageStatus = async ({

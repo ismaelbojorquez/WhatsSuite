@@ -8,6 +8,7 @@ import {
   setChatQueue
 } from '../infra/db/chatRepository.js';
 import {
+  findMessageByDedupeKey,
   findMessageByUniqueKey,
   insertMessage,
   softDeleteMessage,
@@ -155,6 +156,22 @@ export const handleIncomingWhatsAppMessage = async ({
         isArchived,
         isMuted
       });
+    }
+    const existing = await findMessageByDedupeKey({
+      sessionName,
+      whatsappMessageId: messageId,
+      tenantId: chat.tenantId || tenantId
+    });
+    if (existing) {
+      await updateSessionSyncTracking({
+        sessionName,
+        tenantId: chat.tenantId || tenantId,
+        lastSyncedAt: messageTime,
+        lastMessageId: messageId,
+        syncState: 'IDLE',
+        syncError: null
+      }).catch(() => {});
+      return chat;
     }
     const saved = await insertMessage({
       chatId: chat.id,
