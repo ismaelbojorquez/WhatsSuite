@@ -6,7 +6,7 @@ import { normalizeWhatsAppNumber } from '../shared/phoneNormalizer.js';
 
 const PREFIX = 'warmup:internal-message';
 const GLOBAL_SCOPE = 'global';
-const PENDING_PAIR_TTL_SECONDS = 10 * 60;
+const PENDING_PAIR_TTL_SECONDS = 90;
 const SENT_PAIR_TTL_SECONDS = 30 * 60;
 const MESSAGE_ID_TTL_SECONDS = 45 * 24 * 60 * 60;
 const MEMORY_MAX_KEYS = 5000;
@@ -212,11 +212,10 @@ export const findWarmupMessage = async ({ sessionName, remoteNumber, messageId =
   const acceptMatch = (raw, lookup) => {
     const payload = parsePayload(raw);
     if (!payload || payload.kind !== 'warmup') return null;
-    if (lookup.kind === 'pair' && payload.textHash && incomingTextHash && payload.textHash !== incomingTextHash) {
-      return null;
-    }
-    if (lookup.kind === 'pair' && payload.textHash && !incomingTextHash) {
-      return null;
+    if (lookup.kind === 'pair') {
+      if (payload.phase !== 'pending') return null;
+      if (!payload.textHash || !incomingTextHash) return null;
+      if (payload.textHash !== incomingTextHash) return null;
     }
     return { ...payload, matchedKey: lookup.key, matchedBy: lookup.kind };
   };

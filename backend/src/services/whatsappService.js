@@ -824,10 +824,32 @@ const summarizeOutboundContent = (content) => {
   };
 };
 
+const withSendTimeout = (promise, timeoutMs, context) => {
+  let timer = null;
+  return Promise.race([
+    promise.finally(() => {
+      if (timer) clearTimeout(timer);
+    }),
+    new Promise((_, reject) => {
+      timer = setTimeout(() => {
+        const err = new AppError('Tiempo agotado al enviar mensaje por WhatsApp', 504);
+        err.code = 'WA_SEND_TIMEOUT';
+        err.context = context;
+        reject(err);
+      }, timeoutMs);
+    })
+  ]);
+};
+
 export const sendWhatsAppMessage = async ({ sessionName, remoteNumber, content }) => {
+  const name = normalizeSessionName(sessionName);
   const sock = await getSocketForSession(sessionName);
   if (!sock) {
     throw new AppError('Socket no disponible para la sesión', 503);
+  }
+  const record = sessions.get(name);
+  if (record && record.lastStatus !== 'connected') {
+    throw new AppError(`La sesión ${name} no está conectada para enviar mensajes`, 409);
   }
   // Normalizar strings o payloads mínimos a formato Baileys
   let normalizedContent = null;
@@ -884,7 +906,21 @@ export const sendWhatsAppMessage = async ({ sessionName, remoteNumber, content }
     }
   }
 
-  const result = await sock.sendMessage(jid, toSend);
+  let result = null;
+  try {
+    result = await withSendTimeout(sock.sendMessage(jid, toSend), env.whatsapp.sendTimeoutMs, {
+      sessionName: name,
+      remoteNumber: normalizedDigits
+    });
+  } catch (err) {
+    if (err?.code === 'WA_SEND_TIMEOUT') {
+      logger.error(
+        { tag: 'WA_SEND_TIMEOUT', sessionName: name, remoteNumber: normalizedDigits, timeoutMs: env.whatsapp.sendTimeoutMs },
+        'WhatsApp send timed out'
+      );
+    }
+    throw err;
+  }
   const messageId = result?.key?.id || null;
   return { messageId, mediaMeta };
 };

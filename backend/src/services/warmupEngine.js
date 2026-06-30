@@ -40,7 +40,7 @@ export class WarmupEngine extends EventEmitter {
     maxPerSessionPerRun = 40,
     failShutdownThreshold = 5,
     autoShutdown = true,
-    allowedConnectionStatuses = (process.env.WARMUP_ALLOWED_STATUSES || 'active,connected,reconnecting,pending')
+    allowedConnectionStatuses = (process.env.WARMUP_ALLOWED_STATUSES || 'active,connected')
       .split(',')
       .map((s) => s.trim().toLowerCase())
       .filter(Boolean),

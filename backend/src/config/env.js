@@ -92,7 +92,8 @@ const env = {
   },
   whatsapp: {
     sessionSecret: requireEnv('WHATSAPP_SESSION_SECRET'),
-    historySyncDays: numberFromEnv('WHATSAPP_HISTORY_DAYS', 30)
+    historySyncDays: numberFromEnv('WHATSAPP_HISTORY_DAYS', 30),
+    sendTimeoutMs: numberFromEnv('WHATSAPP_SEND_TIMEOUT_MS', 12000)
   },
   media: {
     storageDir: process.env.MEDIA_STORAGE_DIR || 'storage/media',
