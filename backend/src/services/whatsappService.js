@@ -24,6 +24,14 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { execFile } from 'node:child_process';
 import ffmpegPath from 'ffmpeg-static';
+import { unixTimestampSeconds } from '@whiskeysockets/baileys';
+import {
+  buildMergedTcTokenIndexWrite,
+  isTcTokenExpired,
+  resolveIssuanceJid,
+  resolveTcTokenJid,
+  storeTcTokensFromIqResult
+} from '@whiskeysockets/baileys/lib/Utils/tc-token-utils.js';
 
 const sessions = new Map();
 const creationLocks = new Map();
@@ -106,6 +114,8 @@ const persistSessionRuntimeStatus = async (sessionName, status, tenantId = null)
 
 const OUTBOUND_SEND_ERROR_TTL_MS = 30000;
 const OUTBOUND_SEND_ERROR_WAIT_MS = 750;
+const TRUSTED_CONTACT_TOKEN_TIMEOUT_MS = 5000;
+const trustedContactTokenIssuance = new Map();
 
 const pruneImmediateSendErrors = (record) => {
   if (!record?.immediateSendErrors) return;
@@ -152,6 +162,142 @@ const waitForImmediateSendError = (record, messageId) => {
     record.controller.events.on('message_update', handler);
     timer = setTimeout(() => cleanup(null), OUTBOUND_SEND_ERROR_WAIT_MS);
   });
+};
+
+const isDirectWhatsAppUserJid = (jid) =>
+  typeof jid === 'string' && (jid.endsWith('@s.whatsapp.net') || jid.endsWith('@lid') || jid.endsWith('@c.us'));
+
+const withTrustedContactTokenTimeout = (promise, context) => {
+  let timer = null;
+  return Promise.race([
+    promise.finally(() => {
+      if (timer) clearTimeout(timer);
+    }),
+    new Promise((_, reject) => {
+      timer = setTimeout(() => {
+        const err = new Error('Timed out issuing trusted contact token');
+        err.code = 'WA_TCTOKEN_TIMEOUT';
+        err.context = context;
+        reject(err);
+      }, TRUSTED_CONTACT_TOKEN_TIMEOUT_MS);
+    })
+  ]);
+};
+
+const ensureTrustedContactToken = async (sock, jid, sessionName) => {
+  if (
+    !isDirectWhatsAppUserJid(jid) ||
+    sock?.serverProps?.privacyTokenOn1to1 === false ||
+    !sock?.authState?.keys ||
+    typeof sock?.issuePrivacyTokens !== 'function'
+  ) {
+    return;
+  }
+
+  const lidMapping = sock.signalRepository?.lidMapping;
+  const getLIDForPN = lidMapping?.getLIDForPN?.bind(lidMapping);
+  const getPNForLID = lidMapping?.getPNForLID?.bind(lidMapping);
+  if (!getLIDForPN) {
+    logger.debug({ tag: 'WA_TCTOKEN_SKIP', sessionName, jid }, 'Trusted contact token skipped: LID mapping unavailable');
+    return;
+  }
+
+  let tcTokenJid = jid;
+  try {
+    tcTokenJid = await resolveTcTokenJid(jid, getLIDForPN);
+    const contactTcTokenData = await sock.authState.keys.get('tctoken', [tcTokenJid]);
+    const existingEntry = contactTcTokenData?.[tcTokenJid];
+    if (existingEntry?.token?.length && !isTcTokenExpired(existingEntry?.timestamp)) {
+      return;
+    }
+  } catch (err) {
+    logger.warn(
+      { tag: 'WA_TCTOKEN_LOOKUP_FAILED', sessionName, jid, err: err?.message },
+      'Failed to read trusted contact token cache'
+    );
+  }
+
+  const tokenKey = `${sessionName}:${tcTokenJid}`;
+  if (trustedContactTokenIssuance.has(tokenKey)) {
+    try {
+      await withTrustedContactTokenTimeout(trustedContactTokenIssuance.get(tokenKey), { sessionName, jid, tcTokenJid });
+    } catch (err) {
+      logger.warn(
+        {
+          tag: 'WA_TCTOKEN_FAILED',
+          sessionName,
+          jid,
+          tcTokenJid,
+          code: err?.code || null,
+          err: err?.message
+        },
+        'Trusted contact token pre-issue failed before outbound send'
+      );
+    }
+    return;
+  }
+
+  const issuePromise = (async () => {
+    const issueTimestamp = unixTimestampSeconds();
+    const issueJid = await resolveIssuanceJid(
+      jid,
+      sock.serverProps?.lidTrustedTokenIssueToLid,
+      getLIDForPN,
+      getPNForLID
+    );
+    const result = await sock.issuePrivacyTokens([issueJid], issueTimestamp);
+    await storeTcTokensFromIqResult({
+      result,
+      fallbackJid: tcTokenJid,
+      keys: sock.authState.keys,
+      getLIDForPN
+    });
+
+    const currentData = await sock.authState.keys.get('tctoken', [tcTokenJid]);
+    const currentEntry = currentData?.[tcTokenJid];
+    const indexWrite = await buildMergedTcTokenIndexWrite(sock.authState.keys, [tcTokenJid]);
+    await sock.authState.keys.set({
+      tctoken: {
+        [tcTokenJid]: {
+          token: Buffer.alloc(0),
+          ...currentEntry,
+          senderTimestamp: issueTimestamp
+        },
+        ...indexWrite
+      }
+    });
+
+    logger.info(
+      {
+        tag: 'WA_TCTOKEN_READY',
+        sessionName,
+        jid,
+        tcTokenJid,
+        issueJid,
+        hasToken: Boolean(currentEntry?.token?.length)
+      },
+      'Trusted contact token ready before outbound send'
+    );
+  })();
+
+  trustedContactTokenIssuance.set(tokenKey, issuePromise);
+  try {
+    await withTrustedContactTokenTimeout(issuePromise, { sessionName, jid, tcTokenJid });
+  } catch (err) {
+    logger.warn(
+      {
+        tag: 'WA_TCTOKEN_FAILED',
+        sessionName,
+        jid,
+        tcTokenJid,
+        code: err?.code || null,
+        err: err?.message
+      },
+      'Trusted contact token pre-issue failed before outbound send'
+    );
+  } finally {
+    trustedContactTokenIssuance.delete(tokenKey);
+  }
 };
 
 const attachEvents = (record) => {
@@ -959,6 +1105,7 @@ export const sendWhatsAppMessage = async ({ sessionName, remoteNumber, content }
 
   let result = null;
   try {
+    await ensureTrustedContactToken(sock, jid, name);
     result = await withSendTimeout(sock.sendMessage(jid, toSend), env.whatsapp.sendTimeoutMs, {
       sessionName: name,
       remoteNumber: normalizedDigits
