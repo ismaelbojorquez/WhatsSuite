@@ -31,6 +31,7 @@ const toMessageDate = (messageTimestamp) => {
 };
 
 const ACK_STATUS = {
+  0: 'error',
   1: 'pending',
   2: 'server',
   3: 'delivered',
@@ -939,6 +940,11 @@ export const createWhatsAppSocket = async (
         }
       }
       const editPayload = update?.update?.message || null;
+      const statusError =
+        update?.update?.messageStubParameters?.[0] ||
+        update?.messageStubParameters?.[0] ||
+        update?.error ||
+        null;
       // No mover timestamps al recibir ACKs; solo cambios de contenido deberían traer timestamp explícito.
       const timestamp = null;
 
@@ -948,13 +954,14 @@ export const createWhatsAppSocket = async (
         messageId,
         status: normalizedStatus,
         statusCode,
+        statusError,
         editPayload,
         timestamp,
         tenantId: sessionContext.tenantId
       });
 
       logger.info(
-        { sessionName, messageId, remoteNumber, status: normalizedStatus, statusCode, tag: LOG_TAG },
+        { sessionName, messageId, remoteNumber, status: normalizedStatus, statusCode, statusError, tag: LOG_TAG },
         'messages.update dispatched'
       );
     }

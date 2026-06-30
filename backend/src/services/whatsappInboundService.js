@@ -407,6 +407,7 @@ export const handleWhatsAppMessageUpdate = async ({
   messageId,
   status = null,
   statusCode = null,
+  statusError = null,
   editPayload = null,
   timestamp = null,
   tenantId = null
@@ -420,12 +421,13 @@ export const handleWhatsAppMessageUpdate = async ({
       {
         sessionName,
         remoteNumber,
-        messageId,
-        status,
-        statusCode,
-        matchedBy: warmupMatch.matchedBy,
-        tag: 'WARMUP_INTERNAL_MESSAGE'
-      },
+      messageId,
+      status,
+      statusCode,
+      statusError,
+      matchedBy: warmupMatch.matchedBy,
+      tag: 'WARMUP_INTERNAL_MESSAGE'
+    },
       'Warmup WhatsApp message status ignored by chat inbox'
     );
     return { internal: true, warmup: true };
@@ -441,7 +443,7 @@ export const handleWhatsAppMessageUpdate = async ({
   });
   if (!updated) return null;
   logger.info(
-    { sessionName, remoteNumber, messageId, status, statusCode, tag: LOG_TAG },
+    { sessionName, remoteNumber, messageId, status, statusCode, statusError, tag: LOG_TAG },
     'WhatsApp message status updated'
   );
   return updated;
