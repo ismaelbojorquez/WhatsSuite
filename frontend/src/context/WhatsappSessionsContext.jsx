@@ -84,6 +84,8 @@ export const WhatsappSessionsProvider = ({ children }) => {
   const { logout, apiClientInstance, token } = useAuth();
   const [state, dispatch] = useReducer(reducer, initialState);
   const pollers = useRef(new Map());
+  const inFlightPolls = useRef(new Set());
+  const lastQrFetchAt = useRef(new Map());
   const deletedSessions = useRef(new Set());
   const sessionsRef = useRef(initialState.sessions);
   const { notify } = useNotify();
@@ -104,11 +106,15 @@ export const WhatsappSessionsProvider = ({ children }) => {
       clearInterval(timer);
       pollers.current.delete(sessionId);
     }
+    inFlightPolls.current.delete(sessionId);
+    lastQrFetchAt.current.delete(sessionId);
   }, []);
 
   const pollStatus = useCallback(
     async (sessionId) => {
       if (deletedSessions.current.has(sessionId)) return;
+      if (inFlightPolls.current.has(sessionId)) return;
+      inFlightPolls.current.add(sessionId);
       try {
         const statusResp = await getSessionStatusApi(apiClientInstance, sessionId);
         const status = normalizeWhatsAppStatus(statusResp.status);
@@ -126,11 +132,20 @@ export const WhatsappSessionsProvider = ({ children }) => {
           error: null
         };
         if ((patch.status === 'pending' || patch.status === 'connecting') && !statusResp.qr && !statusResp.qrBase64) {
-          const qrResp = await getSessionQrApi(apiClientInstance, sessionId);
-          patch.qr = qrResp.qr || null;
-          patch.qrBase64 = qrResp.qrBase64 || null;
-          if (patch.qr || patch.qrBase64) {
-            patch.status = 'pending';
+          const now = Date.now();
+          const lastQrAt = lastQrFetchAt.current.get(sessionId) || 0;
+          const currentSession = sessionsRef.current[sessionId] || {};
+          if (now - lastQrAt >= 15000) {
+            lastQrFetchAt.current.set(sessionId, now);
+            const qrResp = await getSessionQrApi(apiClientInstance, sessionId);
+            patch.qr = qrResp.qr || null;
+            patch.qrBase64 = qrResp.qrBase64 || null;
+            if (patch.qr || patch.qrBase64) {
+              patch.status = 'pending';
+            }
+          } else {
+            patch.qr = currentSession.qr || null;
+            patch.qrBase64 = currentSession.qrBase64 || null;
           }
         } else {
           patch.qr = statusResp.qr || null;
@@ -143,6 +158,8 @@ export const WhatsappSessionsProvider = ({ children }) => {
         }
       } catch (err) {
         await handleApiError(err, logout, dispatch, auditService, 'poll_status');
+      } finally {
+        inFlightPolls.current.delete(sessionId);
       }
     },
     [apiClientInstance, auditService, logout, stopPolling]
@@ -161,17 +178,21 @@ export const WhatsappSessionsProvider = ({ children }) => {
     return () => {
       pollers.current.forEach((t) => clearInterval(t));
       pollers.current.clear();
+      inFlightPolls.current.clear();
+      lastQrFetchAt.current.clear();
     };
   }, []);
 
   // Refresco periódico de estado para todas las sesiones visibles (solo GET)
   useEffect(() => {
     const timer = setInterval(() => {
-      const ids = Object.keys(state.sessions);
-      ids.forEach((id) => pollStatus(id));
-    }, 6000);
+      const ids = Object.keys(sessionsRef.current || {});
+      ids.forEach((id) => {
+        if (!pollers.current.has(id)) pollStatus(id);
+      });
+    }, 15000);
     return () => clearInterval(timer);
-  }, [pollStatus, state.sessions]);
+  }, [pollStatus]);
 
   useEffect(() => {
     sessionsRef.current = state.sessions;

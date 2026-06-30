@@ -1,5 +1,6 @@
 import http from 'node:http';
 import process from 'node:process';
+import './infra/logging/consoleFilter.js';
 import app from './app.js';
 import env from './config/env.js';
 import logger from './infra/logging/logger.js';

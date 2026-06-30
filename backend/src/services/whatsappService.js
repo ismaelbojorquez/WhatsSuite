@@ -802,6 +802,28 @@ const buildMediaMessage = async (normalizedContent) => {
   };
 };
 
+const summarizeOutboundContent = (content) => {
+  if (typeof content === 'string') {
+    return { kind: 'text', textLength: content.trim().length };
+  }
+  if (!content || typeof content !== 'object') {
+    return { kind: typeof content };
+  }
+
+  const text = [content.text, content.body, content.message].find((value) => typeof value === 'string') || '';
+  const files = Array.isArray(content.files) ? content.files : [];
+  const hasMedia = Boolean(content.media || content.file || content.document || content.image || content.video || content.audio || files.length);
+
+  return {
+    kind: text ? 'text' : hasMedia ? 'media' : 'object',
+    textLength: typeof text === 'string' ? text.length : null,
+    fileCount: files.length || null,
+    keys: Object.keys(content)
+      .filter((key) => !['data', 'buffer', 'base64', 'file', 'files'].includes(key))
+      .slice(0, 8)
+  };
+};
+
 export const sendWhatsAppMessage = async ({ sessionName, remoteNumber, content }) => {
   const sock = await getSocketForSession(sessionName);
   if (!sock) {
@@ -810,7 +832,7 @@ export const sendWhatsAppMessage = async ({ sessionName, remoteNumber, content }
   // Normalizar strings o payloads mínimos a formato Baileys
   let normalizedContent = null;
   logger.info(
-    { tag: 'WA_SEND_NORMALIZE', sessionName, remoteNumber, rawContent: content },
+    { tag: 'WA_SEND_NORMALIZE', sessionName, remoteNumber, content: summarizeOutboundContent(content) },
     'Normalizing outbound WhatsApp message'
   );
   if (typeof content === 'string') {
