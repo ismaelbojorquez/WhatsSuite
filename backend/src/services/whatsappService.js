@@ -104,6 +104,56 @@ const persistSessionRuntimeStatus = async (sessionName, status, tenantId = null)
     .catch(() => {});
 };
 
+const OUTBOUND_SEND_ERROR_TTL_MS = 30000;
+const OUTBOUND_SEND_ERROR_WAIT_MS = 750;
+
+const pruneImmediateSendErrors = (record) => {
+  if (!record?.immediateSendErrors) return;
+  const now = Date.now();
+  for (const [messageId, payload] of record.immediateSendErrors.entries()) {
+    if (!payload?.at || now - payload.at > OUTBOUND_SEND_ERROR_TTL_MS) {
+      record.immediateSendErrors.delete(messageId);
+    }
+  }
+};
+
+const rememberImmediateSendError = (record, payload) => {
+  if (!record || !payload?.messageId || payload.status !== 'error') return;
+  record.immediateSendErrors = record.immediateSendErrors || new Map();
+  pruneImmediateSendErrors(record);
+  record.immediateSendErrors.set(payload.messageId, { ...payload, at: Date.now() });
+};
+
+const getImmediateSendError = (record, messageId) => {
+  if (!record || !messageId) return null;
+  pruneImmediateSendErrors(record);
+  return record.immediateSendErrors?.get(messageId) || null;
+};
+
+const waitForImmediateSendError = (record, messageId) => {
+  const existing = getImmediateSendError(record, messageId);
+  if (existing || !record?.controller?.events || !messageId) {
+    return Promise.resolve(existing);
+  }
+
+  return new Promise((resolve) => {
+    let timer = null;
+    const cleanup = (payload = null) => {
+      if (timer) clearTimeout(timer);
+      record.controller.events.off?.('message_update', handler);
+      resolve(payload || getImmediateSendError(record, messageId));
+    };
+    const handler = (payload) => {
+      if (payload?.messageId === messageId && payload?.status === 'error') {
+        cleanup(payload);
+      }
+    };
+
+    record.controller.events.on('message_update', handler);
+    timer = setTimeout(() => cleanup(null), OUTBOUND_SEND_ERROR_WAIT_MS);
+  });
+};
+
 const attachEvents = (record) => {
   const { controller } = record;
   controller.events.on('qr', ({ qr, qrBase64 }) => {
@@ -186,6 +236,7 @@ const attachEvents = (record) => {
   });
   controller.events.on('message_update', async (payload) => {
     try {
+      rememberImmediateSendError(record, payload);
       const updated = await handleWhatsAppMessageUpdate({ ...payload, tenantId: record.tenantId });
       if (updated?.internal) {
         return;
@@ -922,6 +973,24 @@ export const sendWhatsAppMessage = async ({ sessionName, remoteNumber, content }
     throw err;
   }
   const messageId = result?.key?.id || null;
+  const immediateError = await waitForImmediateSendError(record, messageId);
+  if (immediateError) {
+    const statusError = immediateError.statusError || immediateError.statusCode || 'unknown';
+    const err = new AppError(`WhatsApp rechazó el mensaje (${statusError})`, 502);
+    err.code = 'WA_SEND_REJECTED';
+    err.context = {
+      sessionName: name,
+      remoteNumber: normalizedDigits,
+      messageId,
+      statusCode: immediateError.statusCode || null,
+      statusError: immediateError.statusError || null
+    };
+    logger.error(
+      { tag: 'WA_SEND_REJECTED', ...err.context },
+      'WhatsApp rejected outbound message'
+    );
+    throw err;
+  }
   return { messageId, mediaMeta };
 };
 
