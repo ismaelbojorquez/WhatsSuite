@@ -666,6 +666,8 @@ export const createWhatsAppSocket = async (
           }
         }
 
+        const statusFromUpsert = msg.key?.fromMe ? mapUpsertStatus(msg.status) : null;
+
         await events.emit('message', {
           sessionName,
           remoteNumber,
@@ -677,6 +679,7 @@ export const createWhatsAppSocket = async (
           timestamp,
           fromMe: Boolean(msg.key?.fromMe),
           messageType,
+          messageStatus: statusFromUpsert,
           media: mediaMeta,
           tenantId: sessionContext.tenantId,
           contactName: pushName,
@@ -686,23 +689,6 @@ export const createWhatsAppSocket = async (
           isMuted: false,
           isHistory: Boolean(isHistory || (type && String(type).toLowerCase().includes('history')))
         });
-
-        // Para mensajes propios, algunos estados vienen solo en upsert: emitimos update inmediato.
-        if (msg.key?.fromMe) {
-          const statusFromUpsert = mapUpsertStatus(msg.status);
-          if (statusFromUpsert) {
-            events.emit('message_update', {
-              sessionName,
-              remoteNumber,
-              messageId,
-              status: statusFromUpsert,
-              statusCode: null,
-              editPayload: null,
-              timestamp,
-              tenantId: sessionContext.tenantId
-            });
-          }
-        }
 
         logger.info(
           { sessionName, messageId, remoteJid: normalizedJid, contentPreview, messageType, tag: 'WA_MESSAGE_DISPATCHED' },

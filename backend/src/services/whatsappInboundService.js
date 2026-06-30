@@ -49,6 +49,7 @@ export const handleIncomingWhatsAppMessage = async ({
   timestamp,
   messageTimestamp = null,
   messageType = 'unknown',
+  messageStatus = null,
   media = null,
   fromMe = false,
   tenantId = null,
@@ -189,7 +190,7 @@ export const handleIncomingWhatsAppMessage = async ({
       timestamp: messageTime,
       whatsappSessionName: sessionName,
       remoteNumber,
-      status: 'sent',
+      status: messageStatus || 'sent',
       tenantId: chat.tenantId || tenantId
     });
     await updateSessionSyncTracking({
