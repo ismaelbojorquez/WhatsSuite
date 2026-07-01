@@ -52,6 +52,25 @@ const logOutboundSendDebug = (tag, data, message) => {
   logger.info({ tag, ...data }, message);
 };
 
+const isDirectWhatsAppJid = (jid) =>
+  typeof jid === 'string' && (jid.endsWith('@s.whatsapp.net') || jid.endsWith('@lid'));
+
+const buildOutboundTarget = (chat) => {
+  const existingJid = typeof chat?.remoteJid === 'string' ? chat.remoteJid.trim() : '';
+  const rawNumber = String(chat?.remoteNumber || (existingJid.endsWith('@s.whatsapp.net') ? existingJid : '') || '').replace(/[^\d]/g, '');
+  const normalizedNumber = normalizeWhatsAppNumber(rawNumber);
+  if (!normalizedNumber) throw new AppError('Número remoto inválido', 400);
+
+  const target = isDirectWhatsAppJid(existingJid) ? existingJid : `${normalizedNumber}@s.whatsapp.net`;
+  return {
+    target,
+    normalizedNumber,
+    persistedJid: isDirectWhatsAppJid(existingJid) ? existingJid : target,
+    shouldUpdateNumber: chat.remoteNumber !== normalizedNumber,
+    shouldUpdateJid: !isDirectWhatsAppJid(existingJid)
+  };
+};
+
 const ensureSendPermission = async (chat, user) => {
   const action = 'chat_send';
   if (!chat || !user) {
@@ -240,15 +259,12 @@ export const sendMessage = async ({ chatId, content, user, ip = null, messageTyp
       }
     }
     await ensureSendPermission(chat, user);
-    const rawNumber = String(chat.remoteJid || chat.remoteNumber || '').replace(/[^\d]/g, '');
-    const normalizedNumber = normalizeWhatsAppNumber(rawNumber);
-    if (!normalizedNumber) throw new AppError('Número remoto inválido', 400);
-    const target = chat.remoteJid || `${normalizedNumber}@s.whatsapp.net`;
-    if (chat.remoteNumber !== normalizedNumber || !chat.remoteJid || !chat.remoteJid.includes(normalizedNumber)) {
+    const { target, normalizedNumber, persistedJid, shouldUpdateNumber, shouldUpdateJid } = buildOutboundTarget(chat);
+    if (shouldUpdateNumber || shouldUpdateJid) {
       await pool
         .query('UPDATE chats SET remote_number = $1, remote_jid = $2, updated_at = NOW() WHERE id = $3', [
           normalizedNumber,
-          target,
+          persistedJid,
           chat.id
         ])
         .catch(() => {});
@@ -257,16 +273,6 @@ export const sendMessage = async ({ chatId, content, user, ip = null, messageTyp
       { chatId, targetJid: target, normalizedNumber, sessionName: chat.whatsappSessionName, tag: 'WA_SEND_TARGET' },
       'Preparing outbound WhatsApp message'
     );
-    if (chat.remoteNumber !== normalizedNumber || (chat.remoteJid && !chat.remoteJid.includes(normalizedNumber))) {
-      await pool
-        .query('UPDATE chats SET remote_number = $1, remote_jid = $2, updated_at = NOW() WHERE id = $3', [
-          normalizedNumber,
-          target,
-          chat.id
-        ])
-        .catch(() => {});
-    }
-
     const normalizedContent = typeof content === 'string' ? { text: content } : { ...(content || {}) };
     const transportContent = { ...normalizedContent };
     delete transportContent.metadata;
@@ -288,6 +294,11 @@ export const sendMessage = async ({ chatId, content, user, ip = null, messageTyp
       remoteNumber: target,
       content: transportContent
     });
+    if (outbound?.remoteJid && outbound.remoteJid !== target) {
+      await pool
+        .query('UPDATE chats SET remote_jid = $1, updated_at = NOW() WHERE id = $2', [outbound.remoteJid, chat.id])
+        .catch(() => {});
+    }
     logOutboundSendDebug(
       'CHAT_OUTBOUND_TRANSPORT_OK',
       {
@@ -405,15 +416,12 @@ export const sendMediaMessage = async ({ chatId, file, caption = '', user, ip = 
     );
   }
   if (!file?.buffer || !file.mimetype) throw new AppError('Archivo inválido', 400);
-  const rawNumber = String(chat.remoteJid || chat.remoteNumber || '').replace(/[^\d]/g, '');
-  const normalizedNumber = normalizeWhatsAppNumber(rawNumber);
-  if (!normalizedNumber) throw new AppError('Número remoto inválido', 400);
-  const target = chat.remoteJid || `${normalizedNumber}@s.whatsapp.net`;
-  if (chat.remoteNumber !== normalizedNumber || (chat.remoteJid && !chat.remoteJid.includes(normalizedNumber))) {
+  const { target, normalizedNumber, persistedJid, shouldUpdateNumber, shouldUpdateJid } = buildOutboundTarget(chat);
+  if (shouldUpdateNumber || shouldUpdateJid) {
     await pool
       .query('UPDATE chats SET remote_number = $1, remote_jid = $2, updated_at = NOW() WHERE id = $3', [
         normalizedNumber,
-        target,
+        persistedJid,
         chat.id
       ])
       .catch(() => {});
@@ -459,6 +467,11 @@ export const sendMediaMessage = async ({ chatId, file, caption = '', user, ip = 
     remoteNumber: target,
     content
   });
+  if (outbound?.remoteJid && outbound.remoteJid !== target) {
+    await pool
+      .query('UPDATE chats SET remote_jid = $1, updated_at = NOW() WHERE id = $2', [outbound.remoteJid, chat.id])
+      .catch(() => {});
+  }
 
   const storedFile = await saveMediaBuffer({
     buffer: file.buffer,

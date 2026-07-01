@@ -184,6 +184,9 @@ const getImmediateSendError = (record, messageId) => {
   return record.immediateSendErrors?.get(messageId) || null;
 };
 
+const isSendErrorCode = (payload, code) =>
+  String(payload?.statusError ?? payload?.statusCode ?? '') === String(code);
+
 const waitForImmediateSendError = (record, messageId) => {
   const existing = getImmediateSendError(record, messageId);
   if (existing || !record?.controller?.events || !messageId) {
@@ -1439,8 +1442,9 @@ export const sendWhatsAppMessage = async ({ sessionName, remoteNumber, content }
   );
 
   let result = null;
+  let trustedContactToken = null;
   try {
-    const trustedContactToken = await ensureTrustedContactToken(sock, jid, name);
+    trustedContactToken = await ensureTrustedContactToken(sock, jid, name);
     if (trustedContactToken?.required && trustedContactToken.hasToken === false) {
       const localTargetSession = await findLocalSessionByWhatsAppIdentity({
         remoteNumber: normalizedDigits,
@@ -1536,13 +1540,108 @@ export const sendWhatsAppMessage = async ({ sessionName, remoteNumber, content }
   const messageId = result?.key?.id || null;
   const immediateError = await waitForImmediateSendError(record, messageId);
   if (immediateError) {
+    const fallbackLidJid = trustedContactToken?.tcTokenJid;
+    if (
+      isSendErrorCode(immediateError, '463') &&
+      typeof fallbackLidJid === 'string' &&
+      fallbackLidJid.endsWith('@lid') &&
+      fallbackLidJid !== jid
+    ) {
+      logger.warn(
+        {
+          tag: 'WA_SEND_RETRY_LID_AFTER_463',
+          sessionName: name,
+          originalJid: jid,
+          fallbackJid: fallbackLidJid,
+          remoteNumber: normalizedDigits,
+          originalMessageId: messageId,
+          statusCode: immediateError.statusCode ?? null,
+          statusError: immediateError.statusError ?? null
+        },
+        'Retrying outbound WhatsApp message using LID after PN was rejected with 463'
+      );
+
+      let retryResult = null;
+      try {
+        retryResult = await withSendTimeout(sock.sendMessage(fallbackLidJid, toSend), env.whatsapp.sendTimeoutMs, {
+          sessionName: name,
+          remoteNumber: normalizedDigits,
+          fallbackJid: fallbackLidJid
+        });
+      } catch (retryErr) {
+        logger.error(
+          {
+            tag: 'WA_SEND_RETRY_LID_FAILED',
+            sessionName: name,
+            originalJid: jid,
+            fallbackJid: fallbackLidJid,
+            remoteNumber: normalizedDigits,
+            originalMessageId: messageId,
+            error: summarizeSendError(retryErr)
+          },
+          'WhatsApp LID fallback sendMessage failed'
+        );
+        throw retryErr;
+      }
+      const retryMessageId = retryResult?.key?.id || null;
+      logWhatsAppSendDebug(
+        'WA_SEND_RETRY_LID_RESULT',
+        {
+          sessionName: name,
+          jid: fallbackLidJid,
+          originalJid: jid,
+          remoteNumber: normalizedDigits,
+          messageId: retryMessageId,
+          fromMe: retryResult?.key?.fromMe ?? null,
+          resultStatus: retryResult?.status ?? null,
+          elapsedMs: Date.now() - sendStartedAt
+        },
+        'WhatsApp LID fallback sendMessage resolved'
+      );
+
+      const retryImmediateError = await waitForImmediateSendError(record, retryMessageId);
+      if (!retryImmediateError) {
+        logWhatsAppAckDebug(
+          'WA_SEND_RETRY_LID_ACK_CLEAR',
+          {
+            sessionName: name,
+            remoteNumber: normalizedDigits,
+            originalMessageId: messageId,
+            messageId: retryMessageId,
+            fallbackJid: fallbackLidJid,
+            waitMs: OUTBOUND_SEND_ERROR_WAIT_MS,
+            elapsedMs: Date.now() - sendStartedAt
+          },
+          'No immediate WhatsApp send error observed after LID fallback'
+        );
+        return { messageId: retryMessageId, mediaMeta, remoteJid: fallbackLidJid, retriedFromMessageId: messageId };
+      }
+
+      logger.error(
+        {
+          tag: 'WA_SEND_RETRY_LID_REJECTED',
+          sessionName: name,
+          originalJid: jid,
+          fallbackJid: fallbackLidJid,
+          remoteNumber: normalizedDigits,
+          originalMessageId: messageId,
+          messageId: retryMessageId,
+          statusCode: retryImmediateError.statusCode ?? null,
+          statusError: retryImmediateError.statusError ?? null
+        },
+        'WhatsApp rejected outbound message after LID fallback'
+      );
+      immediateError.statusCode = retryImmediateError.statusCode ?? immediateError.statusCode;
+      immediateError.statusError = retryImmediateError.statusError ?? immediateError.statusError;
+      immediateError.messageId = retryMessageId;
+    }
     const statusError = immediateError.statusError ?? immediateError.statusCode ?? 'unknown';
     const err = new AppError(`WhatsApp rechazó el mensaje (${statusError})`, 502);
     err.code = 'WA_SEND_REJECTED';
     err.context = {
       sessionName: name,
       remoteNumber: normalizedDigits,
-      messageId,
+      messageId: immediateError.messageId || messageId,
       statusCode: immediateError.statusCode ?? null,
       statusError: immediateError.statusError ?? null
     };
@@ -1563,7 +1662,7 @@ export const sendWhatsAppMessage = async ({ sessionName, remoteNumber, content }
     },
     'No immediate WhatsApp send error observed'
   );
-  return { messageId, mediaMeta };
+  return { messageId, mediaMeta, remoteJid: jid };
 };
 
 export const deleteSession = async (sessionName, { userId = null, ip = null, tenantId = null, userAgent = null } = {}) => {
