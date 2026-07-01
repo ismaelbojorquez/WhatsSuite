@@ -1636,18 +1636,26 @@ export const sendWhatsAppMessage = async ({ sessionName, remoteNumber, content }
       immediateError.messageId = retryMessageId;
     }
     const statusError = immediateError.statusError ?? immediateError.statusCode ?? 'unknown';
-    const err = new AppError(`WhatsApp rechazó el mensaje (${statusError})`, 502);
-    err.code = 'WA_SEND_REJECTED';
+    const isAccountRestricted = String(statusError) === '463';
+    const err = new AppError(
+      isAccountRestricted
+        ? 'WhatsApp restringió esta conexión para iniciar o continuar este chat. Usa otra conexión o espera a que el contacto escriba primero.'
+        : `WhatsApp rechazó el mensaje (${statusError})`,
+      isAccountRestricted ? 409 : 502
+    );
+    err.code = isAccountRestricted ? 'WA_ACCOUNT_RESTRICTED' : 'WA_SEND_REJECTED';
     err.context = {
       sessionName: name,
       remoteNumber: normalizedDigits,
       messageId: immediateError.messageId || messageId,
       statusCode: immediateError.statusCode ?? null,
-      statusError: immediateError.statusError ?? null
+      statusError: immediateError.statusError ?? null,
+      rejectedByWhatsApp: true,
+      recommendation: isAccountRestricted ? 'use_another_connection_or_wait_for_inbound' : null
     };
     logger.error(
-      { tag: 'WA_SEND_REJECTED', ...err.context },
-      'WhatsApp rejected outbound message'
+      { tag: isAccountRestricted ? 'WA_ACCOUNT_RESTRICTED' : 'WA_SEND_REJECTED', ...err.context },
+      isAccountRestricted ? 'WhatsApp account restricted outbound message' : 'WhatsApp rejected outbound message'
     );
     throw err;
   }
