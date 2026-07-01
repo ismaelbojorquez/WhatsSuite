@@ -320,7 +320,8 @@ export const findActiveConnections = async (sessionNames = []) => {
   const { rows } = await pool.query(
     `SELECT session_name, status, last_connected_at, updated_at
      FROM whatsapp_sessions
-     WHERE session_name = ANY($1::text[])`,
+     WHERE session_name = ANY($1::text[])
+       AND deleted_at IS NULL`,
     [sessionNames]
   );
   const now = Date.now();

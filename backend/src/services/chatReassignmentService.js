@@ -24,7 +24,7 @@ const assertQueueCompatibility = async (agentId, queueId) => {
 };
 
 const assertSessionExists = async (sessionName) => {
-  const { rows } = await pool.query('SELECT 1 FROM whatsapp_sessions WHERE session_name = $1 LIMIT 1', [sessionName]);
+  const { rows } = await pool.query('SELECT 1 FROM whatsapp_sessions WHERE session_name = $1 AND deleted_at IS NULL LIMIT 1', [sessionName]);
   if (!rows[0]) throw new AppError('Conexión/WhatsApp session no existe', 404);
 };
 

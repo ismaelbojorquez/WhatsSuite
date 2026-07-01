@@ -5,7 +5,14 @@ import { recordWhatsAppAudit } from '../infra/db/whatsappAuditRepository.js';
 import { recordWhatsAppError } from '../infra/db/whatsappErrorRepository.js';
 import { WhatsAppErrorMessages } from '../whatsapp/whatsappErrors.js';
 import pool from '../infra/db/postgres.js';
-import { findSessionByName, upsertSessionSyncHistory, updateHistorySyncState, getTenantIdForSession } from '../infra/db/whatsappSessionRepository.js';
+import {
+  findSessionByName,
+  prepareSessionForCreate,
+  softDeleteSessionByName,
+  upsertSessionSyncHistory,
+  updateHistorySyncState,
+  getTenantIdForSession
+} from '../infra/db/whatsappSessionRepository.js';
 import {
   handleIncomingWhatsAppMessage,
   handleWhatsAppMessageDelete,
@@ -46,6 +53,19 @@ let lastHistoryDaysFetch = 0;
 const HISTORY_CACHE_MS = 5 * 60 * 1000;
 
 const normalizeSessionName = (name) => (name || 'default').trim() || 'default';
+const isDeletedSessionRecord = (record) => Boolean(record?.deleted || record?.isDeleted || record?.deletedAt);
+
+const deletedSessionError = (sessionName) => {
+  const err = new AppError(`La sesión ${sessionName} fue eliminada; crea una conexión con ese mismo nombre para reactivarla`, 410);
+  err.code = 'WA_SESSION_DELETED';
+  return err;
+};
+
+const assertSessionIsActive = (record, sessionName) => {
+  if (isDeletedSessionRecord(record)) {
+    throw deletedSessionError(sessionName);
+  }
+};
 
 const normalizeKeysPayload = (keys) => {
   if (!keys) return {};
@@ -70,7 +90,7 @@ const getStoredKeysInfo = async (sessionName, tenantId = null) => {
   const name = normalizeSessionName(sessionName);
   const resolvedTenant = tenantId || await getTenantIdForSession(name, tenantId);
   const { rows } = await pool.query(
-    'SELECT keys FROM whatsapp_sessions WHERE session_name = $1 AND tenant_id = $2 LIMIT 1',
+    'SELECT keys FROM whatsapp_sessions WHERE session_name = $1 AND tenant_id = $2 AND deleted_at IS NULL LIMIT 1',
     [name, resolvedTenant]
   );
   return { hasStoredKeys: hasStoredKeysSnapshot(rows[0]?.keys) };
@@ -244,6 +264,35 @@ const buildTrustedContactIssueJids = async (jid, tcTokenJid, sock, getLIDForPN, 
 const readTrustedContactTokenEntry = async (sock, tcTokenJid) => {
   const data = await sock.authState.keys.get('tctoken', [tcTokenJid]);
   return data?.[tcTokenJid] || null;
+};
+
+const findLocalSessionByWhatsAppIdentity = async ({ remoteNumber, lidJid = null, excludeSessionName = null }) => {
+  const remoteDigits = remoteNumber ? String(remoteNumber).replace(/[^\d]/g, '') : null;
+  const lidDigits = lidJid ? String(lidJid).split('@')[0].split(':')[0].replace(/[^\d]/g, '') : null;
+  if (!remoteDigits && !lidDigits) return null;
+
+  const { rows } = await pool.query(
+    `SELECT session_name, status, creds->'me'->>'id' AS me_id, creds->'me'->>'lid' AS me_lid
+     FROM whatsapp_sessions
+     WHERE ($1::text IS NULL OR session_name <> $1)
+       AND deleted_at IS NULL
+       AND (
+         ($2::text IS NOT NULL AND regexp_replace(split_part(COALESCE(creds->'me'->>'id', ''), ':', 1), '\\D', '', 'g') = $2)
+         OR
+         ($3::text IS NOT NULL AND regexp_replace(split_part(COALESCE(creds->'me'->>'lid', ''), ':', 1), '\\D', '', 'g') = $3)
+       )
+     ORDER BY CASE WHEN LOWER(status) = 'connected' THEN 0 ELSE 1 END, updated_at DESC
+     LIMIT 1`,
+    [excludeSessionName, remoteDigits, lidDigits]
+  );
+  return rows[0]
+    ? {
+        sessionName: rows[0].session_name,
+        status: rows[0].status,
+        meId: rows[0].me_id,
+        meLid: rows[0].me_lid
+      }
+    : null;
 };
 
 const ensureTrustedContactToken = async (sock, jid, sessionName) => {
@@ -648,6 +697,11 @@ const attachEvents = (record) => {
 
 const createRecord = async (sessionName, sessionConfig = null) => {
   let config = sessionConfig || (await findSessionByName({ sessionName }));
+  if (config?.isDeleted) {
+    const err = new AppError(`La sesión ${sessionName} fue eliminada`, 410);
+    err.code = 'WA_SESSION_DELETED';
+    throw err;
+  }
   if (!config.id && !config.syncHistory) {
     config = await upsertSessionSyncHistory({ sessionName, tenantId: config.tenantId, syncHistory: true });
   }
@@ -677,25 +731,32 @@ const createRecord = async (sessionName, sessionConfig = null) => {
   return record;
 };
 
+const buildDeletedSessionRecord = async (name, config = {}) => {
+  const historyDays = await resolveHistoryDays();
+  return {
+    controller: { events: { on: () => {}, removeAllListeners: () => {} }, sock: null },
+    lastQr: null,
+    lastPairingCode: null,
+    lastStatus: 'deleted',
+    lastStatusReason: 'deleted',
+    lastConnectedAt: null,
+    sessionName: name,
+    context: {},
+    tenantId: config.tenantId || null,
+    syncHistory: false,
+    historySyncStatus: 'idle',
+    historyDays,
+    deleted: true,
+    deletedAt: config.deletedAt || null
+  };
+};
+
 const ensureSessionRecord = async (sessionName, { tenantId = null } = {}) => {
   const name = normalizeSessionName(sessionName);
-  const config = await findSessionByName({ sessionName: name, tenantId });
-  if (deletedSessions.has(name)) {
-    const historyDays = await resolveHistoryDays();
-    return {
-      controller: { events: { on: () => {}, removeAllListeners: () => {} }, sock: null },
-      lastQr: null,
-      lastPairingCode: null,
-      lastStatus: 'deleted',
-      lastStatusReason: 'deleted',
-      lastConnectedAt: null,
-      sessionName: name,
-      context: {},
-      tenantId: config.tenantId,
-      syncHistory: config.syncHistory,
-      historySyncStatus: config.historySyncStatus || 'idle',
-      historyDays
-    };
+  const config = await findSessionByName({ sessionName: name, tenantId, includeDeleted: true });
+  if (deletedSessions.has(name) || config?.isDeleted) {
+    deletedSessions.add(name);
+    return buildDeletedSessionRecord(name, config);
   }
   if (sessions.has(name)) {
     const existing = sessions.get(name);
@@ -724,8 +785,13 @@ const ensureSessionRecord = async (sessionName, { tenantId = null } = {}) => {
 
 export const createSession = async (sessionName, { userId = null, ip = null, tenantId = null, userAgent = null } = {}) => {
   const name = normalizeSessionName(sessionName);
+  const prepared = await prepareSessionForCreate({ sessionName: name, tenantId });
   deletedSessions.delete(name);
-  const record = await ensureSessionRecord(name, { tenantId });
+  if (prepared?.wasDeleted) {
+    const auth = await createPostgresAuthState(name);
+    await auth.resetState();
+  }
+  const record = await ensureSessionRecord(name, { tenantId: prepared?.tenantId || tenantId });
   record.context = { userId, ip, userAgent };
   await recordWhatsAppAudit({
     sessionName: record.sessionName,
@@ -746,6 +812,15 @@ export const createSession = async (sessionName, { userId = null, ip = null, ten
 
 export const getQrForSession = async (sessionName, { tenantId = null } = {}) => {
   const record = await ensureSessionRecord(sessionName, { tenantId });
+  if (isDeletedSessionRecord(record)) {
+    return {
+      session: normalizeSessionName(sessionName),
+      qr: null,
+      qrBase64: null,
+      status: 'deleted',
+      hasStoredKeys: false
+    };
+  }
   const { hasStoredKeys } = await getStoredKeysInfo(sessionName, record?.tenantId || tenantId);
   const hasQr = Boolean(record.lastQr?.qr || record.lastQr?.qrBase64);
   return {
@@ -759,7 +834,8 @@ export const getQrForSession = async (sessionName, { tenantId = null } = {}) => 
 
 export const requestPairingCode = async (sessionName, phoneNumber, { userId = null, ip = null, tenantId = null, userAgent = null } = {}) => {
   const name = normalizeSessionName(sessionName);
-  await ensureSessionRecord(name, { tenantId });
+  const ensured = await ensureSessionRecord(name, { tenantId });
+  assertSessionIsActive(ensured, name);
   if (!phoneNumber) {
     await recordWhatsAppError({
       sessionName: name,
@@ -828,8 +904,8 @@ export const getStatusForSession = async (sessionName, { tenantId = null } = {})
     };
   }
 
-  const config = await findSessionByName({ sessionName: name, tenantId });
-  if (!config.id) {
+  const config = await findSessionByName({ sessionName: name, tenantId, includeDeleted: true });
+  if (!config.id || config.isDeleted) {
     deletedSessions.add(name);
     return {
       session: name,
@@ -865,6 +941,7 @@ export const reconnectSession = async (
 ) => {
   const name = normalizeSessionName(sessionName);
   const existing = await ensureSessionRecord(name, { tenantId });
+  assertSessionIsActive(existing, name);
   if (existing) {
     existing.context = { userId, ip, userAgent };
   }
@@ -921,6 +998,7 @@ export const reconnectSession = async (
 export const renewQrSession = async (sessionName, { userId = null, ip = null, tenantId = null, userAgent = null } = {}) => {
   const name = normalizeSessionName(sessionName);
   const record = await ensureSessionRecord(name, { tenantId });
+  assertSessionIsActive(record, name);
   if (record) {
     record.context = { userId, ip, userAgent };
   }
@@ -956,6 +1034,7 @@ export const resetSessionAuth = async (
   const name = normalizeSessionName(sessionName);
   deletedSessions.delete(name);
   const record = await ensureSessionRecord(name, { tenantId });
+  assertSessionIsActive(record, name);
   if (record) {
     record.context = { userId, ip, userAgent };
   }
@@ -995,6 +1074,9 @@ export const shutdownWhatsAppSessions = async () => {
 export const disconnectSession = async (sessionName, { userId = null, ip = null, tenantId = null, userAgent = null } = {}) => {
   const name = normalizeSessionName(sessionName);
   const record = await ensureSessionRecord(name, { tenantId });
+  if (isDeletedSessionRecord(record)) {
+    return getStatusForSession(name, { tenantId: record?.tenantId || tenantId });
+  }
   record.context = { userId, ip, userAgent };
   if (record?.controller?.sock) {
     try {
@@ -1031,7 +1113,9 @@ export const listSessions = async (tenantId = null) => {
   `;
   if (resolvedTenant) {
     params.push(resolvedTenant);
-    sql += ' WHERE tenant_id = $1';
+    sql += ' WHERE tenant_id = $1 AND deleted_at IS NULL';
+  } else {
+    sql += ' WHERE deleted_at IS NULL';
   }
   sql += ' ORDER BY updated_at DESC';
   const { rows } = await pool.query(sql, params);
@@ -1091,6 +1175,10 @@ export const updateSessionSettings = async (
   { tenantId = null, syncHistory = null, userId = null, ip = null, userAgent = null } = {}
 ) => {
   const name = normalizeSessionName(sessionName);
+  const existing = await findSessionByName({ sessionName: name, tenantId, includeDeleted: true });
+  if (existing?.isDeleted) {
+    throw deletedSessionError(name);
+  }
   const resolvedTenant = await getTenantIdForSession(name, tenantId);
   const updated = await upsertSessionSyncHistory({
     sessionName: name,
@@ -1354,6 +1442,17 @@ export const sendWhatsAppMessage = async ({ sessionName, remoteNumber, content }
   try {
     const trustedContactToken = await ensureTrustedContactToken(sock, jid, name);
     if (trustedContactToken?.required && trustedContactToken.hasToken === false) {
+      const localTargetSession = await findLocalSessionByWhatsAppIdentity({
+        remoteNumber: normalizedDigits,
+        lidJid: trustedContactToken.tcTokenJid || null,
+        excludeSessionName: name
+      }).catch((err) => {
+        logger.warn(
+          { err, sessionName: name, remoteNumber: normalizedDigits, tag: 'WA_SEND_LOCAL_TARGET_LOOKUP_FAILED' },
+          'Failed to check whether outbound target is a local WhatsApp session'
+        );
+        return null;
+      });
       logger.warn(
         {
           tag: 'WA_SEND_TCTOKEN_MISSING',
@@ -1361,6 +1460,7 @@ export const sendWhatsAppMessage = async ({ sessionName, remoteNumber, content }
           jid,
           remoteNumber: normalizedDigits,
           tcTokenJid: trustedContactToken.tcTokenJid || null,
+          localTargetSession,
           source: trustedContactToken.source || null,
           attempts: trustedContactToken.attempts || null,
           elapsedMs: Date.now() - sendStartedAt
@@ -1375,6 +1475,7 @@ export const sendWhatsAppMessage = async ({ sessionName, remoteNumber, content }
           remoteNumber: normalizedDigits,
           jid,
           tcTokenJid: trustedContactToken.tcTokenJid || null,
+          localTargetSession,
           source: trustedContactToken.source || null
         };
         throw err;
@@ -1480,7 +1581,7 @@ export const deleteSession = async (sessionName, { userId = null, ip = null, ten
   reconnectLocks.delete(name);
   deletedSessions.add(name);
 
-  await pool.query('DELETE FROM whatsapp_sessions WHERE (session_name = $1 OR name = $1) AND tenant_id = $2', [name, resolvedTenant]);
+  await softDeleteSessionByName({ sessionName: name, tenantId: resolvedTenant });
   await recordWhatsAppAudit({
     sessionName: name,
     event: 'session_deleted',

@@ -10,7 +10,7 @@ export const getWhatsAppStatus = () => whatsappManager.getStatus();
 
 // Recorre whatsapp_sessions y levanta sockets al arrancar el backend.
 export const bootstrapValidSessions = async () => {
-  const { rows } = await pool.query('SELECT session_name FROM whatsapp_sessions');
+  const { rows } = await pool.query('SELECT session_name FROM whatsapp_sessions WHERE deleted_at IS NULL');
   const sessions = rows.map((r) => r.session_name);
   let recovered = 0;
   for (const name of sessions) {
