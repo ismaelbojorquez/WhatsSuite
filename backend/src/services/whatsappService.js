@@ -134,7 +134,7 @@ const persistSessionRuntimeStatus = async (sessionName, status, tenantId = null)
 };
 
 const OUTBOUND_SEND_ERROR_TTL_MS = 30000;
-const OUTBOUND_SEND_ERROR_WAIT_MS = 750;
+const OUTBOUND_SEND_ERROR_WAIT_MS = 3000;
 const TRUSTED_CONTACT_TOKEN_TIMEOUT_MS = 5000;
 const trustedContactTokenIssuance = new Map();
 
@@ -1468,17 +1468,19 @@ export const sendWhatsAppMessage = async ({ sessionName, remoteNumber, content }
         'WhatsApp trusted contact token is missing before outbound send'
       );
       if (env.whatsapp?.requireTrustedContactToken) {
-        const err = new AppError('WhatsApp no entregó trusted contact token para este contacto; el mensaje no se enviará para evitar una sola palomita', 409);
-        err.code = 'WA_TCTOKEN_MISSING';
-        err.context = {
-          sessionName: name,
-          remoteNumber: normalizedDigits,
-          jid,
-          tcTokenJid: trustedContactToken.tcTokenJid || null,
-          localTargetSession,
-          source: trustedContactToken.source || null
-        };
-        throw err;
+        logger.warn(
+          {
+            tag: 'WA_SEND_TCTOKEN_PREFLIGHT_BYPASS',
+            sessionName: name,
+            jid,
+            remoteNumber: normalizedDigits,
+            tcTokenJid: trustedContactToken.tcTokenJid || null,
+            localTargetSession,
+            source: trustedContactToken.source || null,
+            immediateAckWaitMs: OUTBOUND_SEND_ERROR_WAIT_MS
+          },
+          'Continuing outbound send without trusted contact token; immediate WhatsApp rejection will be handled if returned'
+        );
       }
     }
     logWhatsAppSendDebug(
