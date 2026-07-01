@@ -241,6 +241,11 @@ const buildTrustedContactIssueJids = async (jid, tcTokenJid, sock, getLIDForPN, 
   return candidates;
 };
 
+const readTrustedContactTokenEntry = async (sock, tcTokenJid) => {
+  const data = await sock.authState.keys.get('tctoken', [tcTokenJid]);
+  return data?.[tcTokenJid] || null;
+};
+
 const ensureTrustedContactToken = async (sock, jid, sessionName) => {
   if (
     !isDirectWhatsAppUserJid(jid) ||
@@ -260,7 +265,12 @@ const ensureTrustedContactToken = async (sock, jid, sessionName) => {
       },
       'Trusted contact token skipped before outbound send'
     );
-    return;
+    return {
+      checked: false,
+      required: Boolean(sock?.serverProps?.privacyTokenOn1to1),
+      hasToken: null,
+      reason: 'not_applicable'
+    };
   }
 
   const lidMapping = sock.signalRepository?.lidMapping;
@@ -268,14 +278,13 @@ const ensureTrustedContactToken = async (sock, jid, sessionName) => {
   const getPNForLID = lidMapping?.getPNForLID?.bind(lidMapping);
   if (!getLIDForPN) {
     logger.debug({ tag: 'WA_TCTOKEN_SKIP', sessionName, jid }, 'Trusted contact token skipped: LID mapping unavailable');
-    return;
+    return { checked: false, required: true, hasToken: null, reason: 'lid_mapping_unavailable' };
   }
 
   let tcTokenJid = jid;
   try {
     tcTokenJid = await resolveTcTokenJid(jid, getLIDForPN);
-    const contactTcTokenData = await sock.authState.keys.get('tctoken', [tcTokenJid]);
-    const existingEntry = contactTcTokenData?.[tcTokenJid];
+    const existingEntry = await readTrustedContactTokenEntry(sock, tcTokenJid);
     if (isUsableTrustedContactTokenEntry(existingEntry)) {
       logTrustedContactTokenDebug(
         'WA_TCTOKEN_CACHE_HIT',
@@ -288,7 +297,15 @@ const ensureTrustedContactToken = async (sock, jid, sessionName) => {
         },
         'Trusted contact token cache hit'
       );
-      return;
+      return {
+        checked: true,
+        required: true,
+        hasToken: true,
+        tcTokenJid,
+        source: 'cache',
+        tokenLength: existingEntry?.token?.length || 0,
+        timestamp: existingEntry?.timestamp || null
+      };
     }
     logTrustedContactTokenDebug(
       'WA_TCTOKEN_CACHE_MISS',
@@ -317,7 +334,18 @@ const ensureTrustedContactToken = async (sock, jid, sessionName) => {
         { sessionName, jid, tcTokenJid },
         'Waiting for in-flight trusted contact token issue'
       );
-      await withTrustedContactTokenTimeout(trustedContactTokenIssuance.get(tokenKey), { sessionName, jid, tcTokenJid });
+      const inFlightResult = await withTrustedContactTokenTimeout(trustedContactTokenIssuance.get(tokenKey), { sessionName, jid, tcTokenJid });
+      const currentEntry = await readTrustedContactTokenEntry(sock, tcTokenJid).catch(() => null);
+      return {
+        checked: true,
+        required: true,
+        hasToken: isUsableTrustedContactTokenEntry(currentEntry),
+        tcTokenJid,
+        source: 'in_flight',
+        tokenLength: currentEntry?.token?.length || 0,
+        timestamp: currentEntry?.timestamp || null,
+        attempts: inFlightResult?.attempts || null
+      };
     } catch (err) {
       logger.warn(
         {
@@ -330,8 +358,15 @@ const ensureTrustedContactToken = async (sock, jid, sessionName) => {
         },
         'Trusted contact token pre-issue failed before outbound send'
       );
+      return {
+        checked: true,
+        required: true,
+        hasToken: false,
+        tcTokenJid,
+        source: 'in_flight_failed',
+        error: err?.message || null
+      };
     }
-    return;
   }
 
   const issuePromise = (async () => {
@@ -408,11 +443,22 @@ const ensureTrustedContactToken = async (sock, jid, sessionName) => {
       },
       'Trusted contact token ready before outbound send'
     );
+    return {
+      checked: true,
+      required: true,
+      hasToken: isUsableTrustedContactTokenEntry(currentEntry),
+      tcTokenJid,
+      source: 'issued',
+      tokenLength: currentEntry?.token?.length || 0,
+      timestamp: currentEntry?.timestamp || null,
+      issueJids,
+      attempts
+    };
   })();
 
   trustedContactTokenIssuance.set(tokenKey, issuePromise);
   try {
-    await withTrustedContactTokenTimeout(issuePromise, { sessionName, jid, tcTokenJid });
+    return await withTrustedContactTokenTimeout(issuePromise, { sessionName, jid, tcTokenJid });
   } catch (err) {
     logger.warn(
       {
@@ -425,6 +471,14 @@ const ensureTrustedContactToken = async (sock, jid, sessionName) => {
       },
       'Trusted contact token pre-issue failed before outbound send'
     );
+    return {
+      checked: true,
+      required: true,
+      hasToken: false,
+      tcTokenJid,
+      source: 'issue_failed',
+      error: err?.message || null
+    };
   } finally {
     trustedContactTokenIssuance.delete(tokenKey);
   }
@@ -1298,10 +1352,45 @@ export const sendWhatsAppMessage = async ({ sessionName, remoteNumber, content }
 
   let result = null;
   try {
-    await ensureTrustedContactToken(sock, jid, name);
+    const trustedContactToken = await ensureTrustedContactToken(sock, jid, name);
+    if (trustedContactToken?.required && trustedContactToken.hasToken === false) {
+      logger.warn(
+        {
+          tag: 'WA_SEND_TCTOKEN_MISSING',
+          sessionName: name,
+          jid,
+          remoteNumber: normalizedDigits,
+          tcTokenJid: trustedContactToken.tcTokenJid || null,
+          source: trustedContactToken.source || null,
+          attempts: trustedContactToken.attempts || null,
+          elapsedMs: Date.now() - sendStartedAt
+        },
+        'WhatsApp trusted contact token is missing before outbound send'
+      );
+      if (env.whatsapp?.requireTrustedContactToken) {
+        const err = new AppError('WhatsApp no entregó trusted contact token para este contacto; el mensaje no se enviará para evitar una sola palomita', 409);
+        err.code = 'WA_TCTOKEN_MISSING';
+        err.context = {
+          sessionName: name,
+          remoteNumber: normalizedDigits,
+          jid,
+          tcTokenJid: trustedContactToken.tcTokenJid || null,
+          source: trustedContactToken.source || null
+        };
+        throw err;
+      }
+    }
     logWhatsAppSendDebug(
       'WA_SEND_TCTOKEN_DONE',
-      { sessionName: name, jid, elapsedMs: Date.now() - sendStartedAt },
+      {
+        sessionName: name,
+        jid,
+        elapsedMs: Date.now() - sendStartedAt,
+        tokenRequired: trustedContactToken?.required ?? null,
+        hasToken: trustedContactToken?.hasToken ?? null,
+        tcTokenJid: trustedContactToken?.tcTokenJid || null,
+        tokenSource: trustedContactToken?.source || null
+      },
       'Trusted contact token preflight completed'
     );
     result = await withSendTimeout(sock.sendMessage(jid, toSend), env.whatsapp.sendTimeoutMs, {

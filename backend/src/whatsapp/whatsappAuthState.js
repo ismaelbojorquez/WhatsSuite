@@ -110,7 +110,7 @@ const loadState = async (sessionName) => {
   });
 };
 
-const persistState = async (sessionName, { creds, keys, status = 'pending', replace = false }) => {
+const persistState = async (sessionName, { creds, keys, status = null, replace = false }) => {
   return withSessionLock(sessionName, async (client) => {
     const current = await client.query(
       'SELECT creds, keys FROM whatsapp_sessions WHERE session_name = $1 FOR UPDATE',
@@ -124,12 +124,12 @@ const persistState = async (sessionName, { creds, keys, status = 'pending', repl
     const tenantId = await resolveTenantId();
     await client.query(
       `INSERT INTO whatsapp_sessions (session_name, name, creds, keys, status, tenant_id, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, NOW())
+       VALUES ($1, $2, $3, $4, COALESCE($5, 'pending'), $6, NOW())
        ON CONFLICT (session_name) DO UPDATE
          SET name = EXCLUDED.name,
              creds = EXCLUDED.creds,
              keys = EXCLUDED.keys,
-             status = EXCLUDED.status,
+             status = COALESCE($5, whatsapp_sessions.status),
              tenant_id = COALESCE(whatsapp_sessions.tenant_id, EXCLUDED.tenant_id),
              updated_at = EXCLUDED.updated_at`,
       [sessionName, sessionName, encode(mergedCreds), encode(mergedKeys), status, tenantId]

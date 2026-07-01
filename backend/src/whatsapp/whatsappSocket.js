@@ -236,6 +236,17 @@ const summarizeMessageUpdate = (update) => ({
   error: update?.error?.message || update?.error?.toString?.() || null
 });
 
+const summarizeBinaryNode = (node) => ({
+  tag: node?.tag || null,
+  attrs: node?.attrs || {},
+  childTags: Array.isArray(node?.content)
+    ? node.content
+        .map((child) => child?.tag)
+        .filter(Boolean)
+        .slice(0, 12)
+    : []
+});
+
 export const createWhatsAppSocket = async (
   sessionName = 'default',
   { syncHistory = false, tenantId = null, historyDays = env.whatsapp?.historySyncDays || 30 } = {}
@@ -1056,6 +1067,31 @@ export const createWhatsAppSocket = async (
     instance.ev.on('messages.update', enqueueRealtime('messages.update', handleMessagesUpdate));
     instance.ev.on('messages.delete', enqueueRealtime('messages.delete', handleMessagesDelete));
     instance.ev.on('messaging-history.set', enqueueRealtime('messaging-history.set', handleMessagingHistory));
+
+    if (env.whatsapp?.debugAck && instance.ws?.on) {
+      instance.ws.on('CB:ack,class:message', (node) => {
+        logWhatsAppAckDebug(
+          'WA_ACK_LOW_LEVEL',
+          { sessionName, node: summarizeBinaryNode(node) },
+          'Low-level WhatsApp message ACK received'
+        );
+      });
+      instance.ws.on('CB:receipt', (node) => {
+        logWhatsAppAckDebug(
+          'WA_RECEIPT_LOW_LEVEL',
+          { sessionName, node: summarizeBinaryNode(node) },
+          'Low-level WhatsApp receipt received'
+        );
+      });
+      instance.ws.on('CB:notification', (node) => {
+        if (node?.attrs?.type !== 'privacy_token') return;
+        logWhatsAppAckDebug(
+          'WA_PRIVACY_TOKEN_NOTIFICATION',
+          { sessionName, node: summarizeBinaryNode(node) },
+          'Low-level WhatsApp privacy token notification received'
+        );
+      });
+    }
   };
 
   const createSocketInstance = () => {
