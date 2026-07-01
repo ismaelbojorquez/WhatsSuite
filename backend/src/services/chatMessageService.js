@@ -32,6 +32,26 @@ const logChatMsgAudit = async ({ actorId, action, chatId, ip, metadata }) => {
 
 const accessError = (message, trace, code = 'CHAT_ACCESS_DENIED') => new AppError(message, 403, trace, code);
 
+const summarizeChatOutboundContent = (content) => {
+  if (typeof content === 'string') return { kind: 'text', textLength: content.trim().length };
+  if (!content || typeof content !== 'object') return { kind: typeof content };
+  const text = [content.text, content.body, content.message].find((value) => typeof value === 'string') || '';
+  const files = Array.isArray(content.files) ? content.files : [];
+  return {
+    kind: text ? 'text' : files.length ? 'media' : 'object',
+    textLength: text ? text.length : null,
+    fileCount: files.length || null,
+    keys: Object.keys(content)
+      .filter((key) => !['data', 'buffer', 'base64', 'file', 'files'].includes(key))
+      .slice(0, 8)
+  };
+};
+
+const logOutboundSendDebug = (tag, data, message) => {
+  if (!env.whatsapp?.debugSend) return;
+  logger.info({ tag, ...data }, message);
+};
+
 const ensureSendPermission = async (chat, user) => {
   const action = 'chat_send';
   if (!chat || !user) {
@@ -196,6 +216,21 @@ const emitChatEvents = async (chat, message, { actorUserId = null } = {}) => {
 export const sendMessage = async ({ chatId, content, user, ip = null, messageType, metadata = null }) => {
   const chat = await getChatById(chatId, { useCache: false });
   if (!chat) throw new AppError('Chat no encontrado', 404);
+  logOutboundSendDebug(
+    'CHAT_OUTBOUND_REQUEST',
+    {
+      chatId,
+      userId: user?.id || null,
+      userRole: user?.role || null,
+      sessionName: chat.whatsappSessionName,
+      remoteNumber: chat.remoteNumber,
+      remoteJid: chat.remoteJid,
+      chatStatus: chat.status,
+      queueId: chat.queueId,
+      content: summarizeChatOutboundContent(content)
+    },
+    'Chat outbound send requested'
+  );
   try {
     if (!chat.queueId) {
       const { queueId } = await resolveQueueForSessionOrThrow(chat.whatsappSessionName, user);
@@ -253,6 +288,17 @@ export const sendMessage = async ({ chatId, content, user, ip = null, messageTyp
       remoteNumber: target,
       content: transportContent
     });
+    logOutboundSendDebug(
+      'CHAT_OUTBOUND_TRANSPORT_OK',
+      {
+        chatId,
+        sessionName: chat.whatsappSessionName,
+        targetJid: target,
+        whatsappMessageId: outbound?.messageId || null,
+        hasMediaMeta: Boolean(outbound?.mediaMeta)
+      },
+      'Chat outbound transport accepted message'
+    );
     const now = new Date();
     const msg = await insertMessage({
       chatId,
@@ -265,6 +311,18 @@ export const sendMessage = async ({ chatId, content, user, ip = null, messageTyp
       status: 'server',
       timestamp: now
     });
+    logOutboundSendDebug(
+      'CHAT_OUTBOUND_PERSISTED',
+      {
+        chatId,
+        dbMessageId: msg.id,
+        sessionName: msg.whatsappSessionName,
+        remoteNumber: msg.remoteNumber,
+        whatsappMessageId: msg.whatsappMessageId,
+        status: msg.status
+      },
+      'Chat outbound message persisted'
+    );
     await pool
       .query('UPDATE chats SET last_message_at = $1, updated_at = NOW() WHERE id = $2', [now, chatId])
       .catch(() => {});
@@ -297,6 +355,20 @@ export const sendMessage = async ({ chatId, content, user, ip = null, messageTyp
     emitMessageSentEvent({ chat, message: msg });
     return msg;
   } catch (err) {
+    logOutboundSendDebug(
+      'CHAT_OUTBOUND_FAILED',
+      {
+        chatId: chat.id,
+        sessionName: chat.whatsappSessionName,
+        remoteNumber: chat.remoteNumber,
+        errorName: err?.name || null,
+        errorCode: err?.code || null,
+        errorStatus: err?.status || err?.statusCode || null,
+        errorMessage: err?.message || 'send_failed',
+        errorContext: err?.context || null
+      },
+      'Chat outbound send failed'
+    );
     const action = err?.status === 403 ? 'chat_send_denied' : 'chat_message_out_error';
     const errorMetadata = {
       error: err?.message || 'send_failed',

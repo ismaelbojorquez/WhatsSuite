@@ -444,7 +444,17 @@ export const handleWhatsAppMessageUpdate = async ({
   });
   if (!updated) return null;
   logger.info(
-    { sessionName, remoteNumber, messageId, status, statusCode, statusError, tag: LOG_TAG },
+    {
+      sessionName,
+      remoteNumber,
+      messageId,
+      status,
+      statusCode,
+      statusError,
+      dbMessageId: updated.id,
+      chatId: updated.chatId,
+      tag: 'WA_ACK_STATUS_UPDATED'
+    },
     'WhatsApp message status updated'
   );
   return updated;

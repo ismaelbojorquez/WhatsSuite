@@ -215,6 +215,27 @@ const lastConnectionUpdate = new Map();
 const lastQrBySession = new Map();
 const LOG_TAG = undefined;
 
+const logWhatsAppAckDebug = (tag, data, message) => {
+  if (!env.whatsapp?.debugAck) return;
+  logger.info({ tag, ...data }, message);
+};
+
+const summarizeMessageUpdate = (update) => ({
+  key: {
+    id: update?.key?.id || null,
+    remoteJid: update?.key?.remoteJid || null,
+    remoteJidAlt: update?.key?.remoteJidAlt || null,
+    participant: update?.key?.participant || null,
+    fromMe: update?.key?.fromMe ?? null
+  },
+  status: update?.status ?? null,
+  updateStatus: update?.update?.status ?? null,
+  updateKeys: update?.update && typeof update.update === 'object' ? Object.keys(update.update).slice(0, 12) : [],
+  messageStubType: update?.messageStubType ?? update?.update?.messageStubType ?? null,
+  messageStubParameters: update?.messageStubParameters || update?.update?.messageStubParameters || null,
+  error: update?.error?.message || update?.error?.toString?.() || null
+});
+
 export const createWhatsAppSocket = async (
   sessionName = 'default',
   { syncHistory = false, tenantId = null, historyDays = env.whatsapp?.historySyncDays || 30 } = {}
@@ -895,6 +916,11 @@ export const createWhatsAppSocket = async (
   const handleMessagesUpdate = async (updates = []) => {
     if (!Array.isArray(updates) || updates.length === 0) return;
     for (const update of updates) {
+      logWhatsAppAckDebug(
+        'WA_ACK_RAW_UPDATE',
+        { sessionName, update: summarizeMessageUpdate(update) },
+        'Raw WhatsApp messages.update received'
+      );
       const messageId = update?.key?.id || null;
       // Priorizar cualquier JID en dominio s.whatsapp.net (incluyendo remoteJidAlt) para alinear con la deduplicación de inbound/outbound.
       const primaryJid = update?.key?.remoteJid || null;
@@ -925,6 +951,12 @@ export const createWhatsAppSocket = async (
           else if (s.includes('pending')) normalizedStatus = 'pending';
         }
       }
+      if (statusRaw !== null && statusRaw !== undefined && !normalizedStatus) {
+        logger.warn(
+          { sessionName, messageId, remoteNumber, statusRaw, update: summarizeMessageUpdate(update), tag: 'WA_ACK_STATUS_UNMAPPED' },
+          'WhatsApp message update status could not be mapped'
+        );
+      }
       const editPayload = update?.update?.message || null;
       const statusError =
         update?.update?.messageStubParameters?.[0] ||
@@ -946,8 +978,23 @@ export const createWhatsAppSocket = async (
         tenantId: sessionContext.tenantId
       });
 
+      logWhatsAppAckDebug(
+        'WA_ACK_MAPPED_UPDATE',
+        {
+          sessionName,
+          messageId,
+          remoteNumber,
+          normalizedJid,
+          status: normalizedStatus,
+          statusCode,
+          statusError,
+          fromMe: update?.key?.fromMe ?? null
+        },
+        'WhatsApp messages.update mapped and emitted'
+      );
+
       logger.info(
-        { sessionName, messageId, remoteNumber, status: normalizedStatus, statusCode, statusError, tag: LOG_TAG },
+        { sessionName, messageId, remoteNumber, status: normalizedStatus, statusCode, statusError, tag: 'WA_ACK_DISPATCHED' },
         'messages.update dispatched'
       );
     }

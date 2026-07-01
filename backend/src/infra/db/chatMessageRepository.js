@@ -1,6 +1,7 @@
 import pool from './postgres.js';
 import { cacheMessages, getCachedMessages, invalidateChat } from '../cache/chatCache.js';
 import logger from '../logging/logger.js';
+import env from '../../config/env.js';
 
 const mapMessage = (row) => ({
   id: row.id,
@@ -39,6 +40,49 @@ const encodeCursor = (row) => {
   const sortAt = row.sort_at || row.timestamp || row.created_at || row.createdAt || Date.now();
   const payload = { t: new Date(sortAt).toISOString(), id: row.id };
   return Buffer.from(JSON.stringify(payload)).toString('base64');
+};
+
+const loadAckMissCandidates = async ({ sessionName, remoteNumber, tenantId = null }) => {
+  if (!env.whatsapp?.debugAck) return null;
+  const params = [];
+  const filters = ["direction = 'out'"];
+
+  if (sessionName) {
+    params.push(sessionName);
+    filters.push(`whatsapp_session_name = $${params.length}`);
+  }
+  if (tenantId) {
+    params.push(tenantId);
+    filters.push(`tenant_id = $${params.length}`);
+  }
+  const normalizedRemote = remoteNumber ? String(remoteNumber).replace(/[^\d]/g, '') : null;
+  const remoteCandidates = Array.from(
+    new Set([remoteNumber, normalizedRemote].filter((value) => value !== null && value !== undefined && value !== ''))
+  );
+  if (remoteCandidates.length) {
+    params.push(remoteCandidates);
+    filters.push(`remote_number = ANY($${params.length}::text[])`);
+  }
+
+  const { rows } = await pool.query(
+    `SELECT id, chat_id, whatsapp_session_name, remote_number, whatsapp_message_id, status, created_at, updated_at
+     FROM chat_messages
+     WHERE ${filters.join(' AND ')}
+     ORDER BY created_at DESC
+     LIMIT 8`,
+    params
+  );
+
+  return rows.map((row) => ({
+    id: row.id,
+    chatId: row.chat_id,
+    sessionName: row.whatsapp_session_name,
+    remoteNumber: row.remote_number,
+    whatsappMessageId: row.whatsapp_message_id,
+    status: row.status,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  }));
 };
 
 const resolveConnectionCandidates = async (sessionName, connectionId = null) => {
@@ -270,6 +314,12 @@ export const updateMessageStatus = async ({
     if (rows[0]) {
       const msg = mapMessage(rows[0]);
       await invalidateChat(msg.chatId);
+      if (env.whatsapp?.debugAck) {
+        logger.info(
+          { sessionName, remoteNumber: remote, whatsappMessageId, status, matchedBy: 'session_remote', tag: 'MSG_STATUS_UPDATE_HIT' },
+          'Message status update matched by session and remote number'
+        );
+      }
       return msg;
     }
   }
@@ -292,6 +342,12 @@ export const updateMessageStatus = async ({
   if (res.rows[0]) {
     const msg = mapMessage(res.rows[0]);
     await invalidateChat(msg.chatId);
+    if (env.whatsapp?.debugAck) {
+      logger.info(
+        { sessionName, remoteNumber, whatsappMessageId, status, matchedBy: 'session_only', tag: 'MSG_STATUS_UPDATE_HIT' },
+        'Message status update matched by session'
+      );
+    }
     return msg;
   }
 
@@ -309,6 +365,7 @@ export const updateMessageStatus = async ({
       ${tenantId ? `AND tenant_id = $${paramsById.push(tenantId)}` : ''}
     RETURNING *`;
   res = await pool.query(idOnlySql, paramsById);
+  let matchedBy = 'id_only';
   if (!res.rows[0] && whatsappMessageId) {
     // Intento extra: insensible a mayúsculas (algunos drivers envían IDs upper/lower)
     const paramsCaseInsensitive = [...baseParams, whatsappMessageId.toLowerCase()];
@@ -323,16 +380,38 @@ export const updateMessageStatus = async ({
         ${tenantId ? `AND tenant_id = $${paramsCaseInsensitive.push(tenantId)}` : ''}
       RETURNING *`;
     res = await pool.query(caseSql, paramsCaseInsensitive);
+    matchedBy = 'case_insensitive_id';
   }
   if (!res.rows[0]) {
+    let candidates = null;
+    try {
+      candidates = await loadAckMissCandidates({ sessionName, remoteNumber, tenantId });
+    } catch (err) {
+      logger.warn({ err, sessionName, remoteNumber, whatsappMessageId, tag: 'MSG_STATUS_UPDATE_MISS_DIAG_FAILED' }, 'Failed to load ACK miss candidates');
+    }
     logger.warn(
-      { sessionName, remoteNumber, whatsappMessageId, status, tag: 'MSG_STATUS_UPDATE_MISS' },
+      {
+        sessionName,
+        remoteNumber,
+        normalizedRemote,
+        whatsappMessageId,
+        status,
+        tenantId,
+        candidates,
+        tag: 'MSG_STATUS_UPDATE_MISS'
+      },
       'No se encontró mensaje para actualizar estado'
     );
     return null;
   }
   const msg = mapMessage(res.rows[0]);
   await invalidateChat(msg.chatId);
+  if (env.whatsapp?.debugAck) {
+    logger.info(
+      { sessionName, remoteNumber, whatsappMessageId, status, matchedBy, tag: 'MSG_STATUS_UPDATE_HIT' },
+      'Message status update matched by id'
+    );
+  }
   return msg;
 };
 
