@@ -1037,6 +1037,35 @@ export const createWhatsAppSocket = async (
     }
   };
 
+  const emitLowLevelAckError = (node) => {
+    const attrs = node?.attrs || {};
+    if (!attrs.error || !attrs.id || !attrs.from) return;
+    const normalizedJid = jidNormalizedUser(attrs.from);
+    const remoteNumber = normalizeRemoteJid(normalizedJid);
+    events.emit('message_update', {
+      sessionName,
+      remoteNumber,
+      messageId: attrs.id,
+      status: 'error',
+      statusCode: attrs.error,
+      statusError: attrs.error,
+      editPayload: null,
+      timestamp: null,
+      tenantId: sessionContext.tenantId
+    });
+    logger.warn(
+      {
+        sessionName,
+        messageId: attrs.id,
+        remoteNumber,
+        statusError: attrs.error,
+        ackAttrs: attrs,
+        tag: 'WA_ACK_LOW_LEVEL_ERROR_EMITTED'
+      },
+      'Low-level WhatsApp ACK error emitted as message update'
+    );
+  };
+
   const attachListeners = (instance) => {
     if (attachedSockets.has(instance)) return;
     attachedSockets.add(instance);
@@ -1068,14 +1097,18 @@ export const createWhatsAppSocket = async (
     instance.ev.on('messages.delete', enqueueRealtime('messages.delete', handleMessagesDelete));
     instance.ev.on('messaging-history.set', enqueueRealtime('messaging-history.set', handleMessagingHistory));
 
-    if (env.whatsapp?.debugAck && instance.ws?.on) {
+    if (instance.ws?.on) {
       instance.ws.on('CB:ack,class:message', (node) => {
         logWhatsAppAckDebug(
           'WA_ACK_LOW_LEVEL',
           { sessionName, node: summarizeBinaryNode(node) },
           'Low-level WhatsApp message ACK received'
         );
+        emitLowLevelAckError(node);
       });
+    }
+
+    if (env.whatsapp?.debugAck && instance.ws?.on) {
       instance.ws.on('CB:receipt', (node) => {
         logWhatsAppAckDebug(
           'WA_RECEIPT_LOW_LEVEL',
