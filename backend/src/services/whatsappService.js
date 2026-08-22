@@ -40,6 +40,10 @@ import {
   storeTcTokensFromIqResult
 } from '@whiskeysockets/baileys/lib/Utils/tc-token-utils.js';
 import { getBinaryNodeChild, getBinaryNodeChildren } from '@whiskeysockets/baileys/lib/WABinary/index.js';
+import {
+  findActiveReachoutRestriction,
+  upsertReachoutRestriction
+} from '../infra/db/whatsappReachoutRestrictionRepository.js';
 
 const sessions = new Map();
 const creationLocks = new Map();
@@ -137,6 +141,29 @@ const OUTBOUND_SEND_ERROR_TTL_MS = 30000;
 const OUTBOUND_SEND_ERROR_WAIT_MS = 3000;
 const TRUSTED_CONTACT_TOKEN_TIMEOUT_MS = 5000;
 const trustedContactTokenIssuance = new Map();
+
+const buildReachoutBlockedError = ({ sessionName, remoteNumber, restriction }) => {
+  const err = new AppError(
+    'WhatsApp Web tiene bloqueado temporalmente el envío a este contacto desde esta conexión. Espera a que el contacto escriba o usa otra conexión.',
+    409
+  );
+  err.code = 'WA_REACHOUT_BLOCKED';
+  err.context = {
+    sessionName,
+    remoteNumber,
+    blockedUntil: restriction?.blockedUntil || null,
+    reason: restriction?.reason || 'reachout_timelock',
+    statusCode: restriction?.statusCode || null,
+    statusError: restriction?.statusError || null,
+    recommendation: 'wait_for_inbound_or_use_another_connection'
+  };
+  return err;
+};
+
+const buildReachoutBlockedUntil = () => {
+  const ttlHours = Math.max(1, Number(env.whatsapp?.reachoutBlockTtlHours) || 24);
+  return new Date(Date.now() + ttlHours * 60 * 60 * 1000);
+};
 
 const logWhatsAppSendDebug = (tag, data, message) => {
   if (!env.whatsapp?.debugSend) return;
@@ -1348,7 +1375,7 @@ const withSendTimeout = (promise, timeoutMs, context) => {
   ]);
 };
 
-export const sendWhatsAppMessage = async ({ sessionName, remoteNumber, content }) => {
+export const sendWhatsAppMessage = async ({ sessionName, remoteNumber, content, contactNumber = null }) => {
   const name = normalizeSessionName(sessionName);
   const sendStartedAt = Date.now();
   const sock = await getSocketForSession(sessionName);
@@ -1401,7 +1428,7 @@ export const sendWhatsAppMessage = async ({ sessionName, remoteNumber, content }
     throw new AppError('Contenido de mensaje inválido o vacío para WhatsApp', 400);
   }
 
-  const sanitized = String(remoteNumber || '').replace(/[^\d]/g, '');
+  const sanitized = String(contactNumber || remoteNumber || '').replace(/[^\d]/g, '');
   const normalizedDigits = normalizeWhatsAppNumber(sanitized);
   if (!normalizedDigits) {
     throw new AppError('Número remoto inválido', 400);
@@ -1412,6 +1439,33 @@ export const sendWhatsAppMessage = async ({ sessionName, remoteNumber, content }
     throw new AppError('No se puede enviar a la misma sesión (JID destino coincide con la sesión)', 400);
   }
   const jid = remoteNumber?.includes('@') ? remoteNumber : `${normalizedDigits}@s.whatsapp.net`;
+  const activeRestriction = await findActiveReachoutRestriction({
+    tenantId: record?.tenantId || null,
+    sessionName: name,
+    remoteNumber: normalizedDigits
+  }).catch((err) => {
+    logger.warn(
+      { err, tag: 'WA_REACHOUT_BLOCK_LOOKUP_FAILED', sessionName: name, remoteNumber: normalizedDigits },
+      'Failed to check WhatsApp reach-out restriction before send'
+    );
+    return null;
+  });
+  if (activeRestriction) {
+    logger.warn(
+      {
+        tag: 'WA_REACHOUT_BLOCKED',
+        sessionName: name,
+        remoteNumber: normalizedDigits,
+        jid,
+        blockedUntil: activeRestriction.blockedUntil,
+        reason: activeRestriction.reason,
+        statusCode: activeRestriction.statusCode,
+        statusError: activeRestriction.statusError
+      },
+      'Outbound WhatsApp send blocked by cached reach-out restriction'
+    );
+    throw buildReachoutBlockedError({ sessionName: name, remoteNumber: normalizedDigits, restriction: activeRestriction });
+  }
 
   let toSend = normalizedContent;
   let mediaMeta = null;
@@ -1637,9 +1691,34 @@ export const sendWhatsAppMessage = async ({ sessionName, remoteNumber, content }
     }
     const statusError = immediateError.statusError ?? immediateError.statusCode ?? 'unknown';
     const isAccountRestricted = String(statusError) === '463';
+    let restriction = null;
+    if (isAccountRestricted) {
+      restriction = await upsertReachoutRestriction({
+        tenantId: record?.tenantId || null,
+        sessionName: name,
+        remoteNumber: normalizedDigits,
+        remoteJid: jid,
+        reason: 'reachout_timelock',
+        statusCode: immediateError.statusCode ?? null,
+        statusError: immediateError.statusError ?? null,
+        messageId: immediateError.messageId || messageId,
+        blockedUntil: buildReachoutBlockedUntil(),
+        metadata: {
+          source: 'whatsapp_ack_463',
+          fallbackTried: Boolean(immediateError.messageId && immediateError.messageId !== messageId),
+          originalMessageId: messageId || null
+        }
+      }).catch((err) => {
+        logger.warn(
+          { err, tag: 'WA_REACHOUT_BLOCK_RECORD_FAILED', sessionName: name, remoteNumber: normalizedDigits },
+          'Failed to persist WhatsApp reach-out restriction'
+        );
+        return null;
+      });
+    }
     const err = new AppError(
       isAccountRestricted
-        ? 'WhatsApp restringió esta conexión para iniciar o continuar este chat. Usa otra conexión o espera a que el contacto escriba primero.'
+        ? 'WhatsApp Web bloqueó temporalmente el envío a este contacto desde esta conexión. No se volverá a intentar hasta que el contacto escriba o expire el bloqueo.'
         : `WhatsApp rechazó el mensaje (${statusError})`,
       isAccountRestricted ? 409 : 502
     );
@@ -1651,7 +1730,8 @@ export const sendWhatsAppMessage = async ({ sessionName, remoteNumber, content }
       statusCode: immediateError.statusCode ?? null,
       statusError: immediateError.statusError ?? null,
       rejectedByWhatsApp: true,
-      recommendation: isAccountRestricted ? 'use_another_connection_or_wait_for_inbound' : null
+      blockedUntil: restriction?.blockedUntil || null,
+      recommendation: isAccountRestricted ? 'wait_for_inbound_or_use_another_connection' : null
     };
     logger.error(
       { tag: isAccountRestricted ? 'WA_ACCOUNT_RESTRICTED' : 'WA_SEND_REJECTED', ...err.context },

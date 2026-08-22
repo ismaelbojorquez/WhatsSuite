@@ -15,6 +15,7 @@ import {
   updateMessageStatus
 } from '../infra/db/chatMessageRepository.js';
 import { updateSessionSyncTracking } from '../infra/db/whatsappSessionRepository.js';
+import { clearReachoutRestriction } from '../infra/db/whatsappReachoutRestrictionRepository.js';
 import { recordChatAudit } from '../infra/db/chatAuditRepository.js';
 import { recordChatAssignmentAudit } from '../infra/db/chatAssignmentAuditRepository.js';
 import { emitToUsers, emitToRoles } from '../infra/realtime/socketHub.js';
@@ -292,6 +293,31 @@ export const handleIncomingWhatsAppMessage = async ({
 
   if (isProtocolOnly) {
     return chat;
+  }
+
+  if (!historyFlag) {
+    const clearCandidates = Array.from(new Set([remoteNumber, chat.remoteNumber].filter(Boolean)));
+    let cleared = 0;
+    for (const candidate of clearCandidates) {
+      cleared += await clearReachoutRestriction({
+        tenantId: chat.tenantId || tenantId,
+        sessionName,
+        remoteNumber: candidate,
+        reason: 'inbound_message'
+      }).catch((err) => {
+        logger.warn(
+          { err, sessionName, remoteNumber: candidate, tag: 'WA_REACHOUT_BLOCK_CLEAR_FAILED' },
+          'Failed to clear WhatsApp reach-out restriction after inbound message'
+        );
+        return 0;
+      });
+    }
+    if (cleared) {
+      logger.info(
+        { sessionName, remoteNumber, cleared, tag: 'WA_REACHOUT_BLOCK_CLEARED' },
+        'Cleared WhatsApp reach-out restriction after inbound message'
+      );
+    }
   }
 
   const saved = await insertMessage({

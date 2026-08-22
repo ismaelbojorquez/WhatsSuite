@@ -12,6 +12,7 @@ import { applySpintaxPayload } from './broadcast.spintax.js';
 import { synthesizeVoiceNote } from './broadcast.tts.js';
 import { sendWhatsAppMessage, getStatusForSession } from '../../services/whatsappService.js';
 import { AppError } from '../../shared/errors.js';
+import { findActiveReachoutRestriction } from '../../infra/db/whatsappReachoutRestrictionRepository.js';
 
 const queue = createWorkerQueue({ concurrency: 5, maxQueue: 2000, name: 'broadcast', logger });
 let poller = null;
@@ -123,7 +124,19 @@ const processMessage = async (message) => {
     (message.connections || []).map(async (session) => {
       try {
         const st = await getStatusForSession(session);
-        return { session_name: st.session, status: st.status || 'unknown' };
+        const sessionStatus = st.status || 'unknown';
+        const restriction = String(sessionStatus).toLowerCase() === 'connected'
+          ? await findActiveReachoutRestriction({
+              tenantId: message.tenant_id || null,
+              sessionName: st.session,
+              remoteNumber: message.target
+            }).catch(() => null)
+          : null;
+        return {
+          session_name: st.session,
+          status: restriction ? 'target_blocked' : sessionStatus,
+          reachoutRestriction: restriction
+        };
       } catch (err) {
         logger.warn({ err, session, tag: 'BROADCAST_STATUS' }, 'No se pudo obtener estado de conexión');
         return { session_name: session, status: 'unknown' };
@@ -164,6 +177,32 @@ const processMessage = async (message) => {
         : runtime?.last_delay_seconds || 0;
   const delayMs = Math.max(0, Number(delaySeconds || 0) * 1000);
   if (!connection) {
+    const blocked = statuses.filter((status) => status.reachoutRestriction);
+    if (blocked.length) {
+      const blockedUntil = blocked
+        .map((status) => status.reachoutRestriction?.blockedUntil)
+        .filter(Boolean)
+        .sort()[0] || null;
+      await updateMessageError({
+        messageId: message.id,
+        error: 'WhatsApp Web bloqueó temporalmente el envío a este contacto desde las conexiones disponibles',
+        retryAt: blockedUntil ? new Date(blockedUntil) : null,
+        final: false
+      });
+      await bumpCampaignCounters(message.campaign_id);
+      logger.warn(
+        {
+          messageId: message.id,
+          target: message.target,
+          campaignId: message.campaign_id,
+          blockedConnections: blocked.map((status) => status.session_name),
+          blockedUntil,
+          tag: 'BROADCAST_REACHOUT_BLOCKED'
+        },
+        'Broadcast message skipped because target is blocked for all available connections'
+      );
+      return;
+    }
     const final = currentAttempt >= (message.max_attempts || 3);
     await updateMessageError({
       messageId: message.id,
@@ -182,15 +221,18 @@ const processMessage = async (message) => {
     await sendWhatsAppMessage({
       sessionName: connection,
       remoteNumber: message.target,
+      contactNumber: message.target,
       content
     });
     await updateMessageSent({ messageId: message.id, sessionName: connection, delaySeconds });
   } catch (err) {
-    const isFinal = currentAttempt >= (message.max_attempts || 3);
+    const isReachoutBlocked = err?.code === 'WA_ACCOUNT_RESTRICTED' || err?.code === 'WA_REACHOUT_BLOCKED';
+    const isFinal = !isReachoutBlocked && currentAttempt >= (message.max_attempts || 3);
+    const reachoutRetryAt = err?.context?.blockedUntil ? new Date(err.context.blockedUntil) : new Date(Date.now() + 60 * 60 * 1000);
     await updateMessageError({
       messageId: message.id,
       error: err?.message || 'Error enviando mensaje',
-      retryAt: new Date(Date.now() + 45_000),
+      retryAt: isReachoutBlocked ? reachoutRetryAt : new Date(Date.now() + 45_000),
       final: isFinal
     });
     logger.error({ err, messageId: message.id, target: message.target, campaignId: message.campaign_id }, 'Broadcast send failed');

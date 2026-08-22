@@ -97,7 +97,8 @@ const env = {
     debugSend: boolFromEnv('WHATSAPP_DEBUG_SEND', false),
     debugAck: boolFromEnv('WHATSAPP_DEBUG_ACK', false),
     debugTrustedContactToken: boolFromEnv('WHATSAPP_DEBUG_TCTOKEN', false),
-    requireTrustedContactToken: boolFromEnv('WHATSAPP_REQUIRE_TCTOKEN', false)
+    requireTrustedContactToken: boolFromEnv('WHATSAPP_REQUIRE_TCTOKEN', false),
+    reachoutBlockTtlHours: numberFromEnv('WHATSAPP_REACHOUT_BLOCK_TTL_HOURS', 24)
   },
   media: {
     storageDir: process.env.MEDIA_STORAGE_DIR || 'storage/media',

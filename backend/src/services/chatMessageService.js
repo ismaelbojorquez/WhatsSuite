@@ -292,6 +292,7 @@ export const sendMessage = async ({ chatId, content, user, ip = null, messageTyp
     const outbound = await sendWhatsAppMessage({
       sessionName: chat.whatsappSessionName,
       remoteNumber: target,
+      contactNumber: normalizedNumber,
       content: transportContent
     });
     if (outbound?.remoteJid && outbound.remoteJid !== target) {
@@ -465,6 +466,7 @@ export const sendMediaMessage = async ({ chatId, file, caption = '', user, ip = 
   const outbound = await sendWhatsAppMessage({
     sessionName: chat.whatsappSessionName,
     remoteNumber: target,
+    contactNumber: normalizedNumber,
     content
   });
   if (outbound?.remoteJid && outbound.remoteJid !== target) {
