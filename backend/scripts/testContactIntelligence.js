@@ -43,6 +43,7 @@ try {
   check(sent.at(-1).occurred_at.getTime()===pending.rows[0].timestamp.getTime(),'A late acknowledgement after closing retains the original sending time');
   await pool.query("UPDATE chats SET status='OPEN' WHERE id=$1",[chat]);
   await insert('reopened-send');
+  for(let i=0;i<5;i++)await pool.query("SELECT contact_intelligence_append($1,'state',$2,'525512345678','OPEN',clock_timestamp())",[tenant,chat]);
   const app=express();app.use(createContactIntelligenceRouter(pool));
   server=await new Promise(resolve=>{const s=app.listen(0,'127.0.0.1',()=>resolve(s));});
   const base='http://127.0.0.1:'+server.address().port+'/events';
@@ -53,7 +54,7 @@ try {
   const otherPage=await(await get('',otherToken)).json();check(otherPage.data.events.length===0,'A second tenant cannot read the first tenant events');
   let cursor='0',all=[];
   do {const page=await(await get('?limit=2&after='+cursor)).json();all.push(...page.data.events);cursor=page.data.next_cursor;if(!page.data.has_more)break;}while(true);
-  check(all.length===7&&all.every((e,i)=>e.sequence===String(i+1)),'All pages are contiguous and include close/reopen history');
+  check(all.length===12&&all.every((e,i)=>e.sequence===String(i+1)),'Pages retain numeric order across 9/10, not lexicographic order; close/reopen history is complete');
   check(all.every(e=>!('content'in e)&&/^\d{4}-.+\.\d{6}Z$/.test(e.occurred_at)),'API sends metadata only, retaining UTC microseconds');
   // An uncommitted sequence cannot be overtaken by another writer or exposed to the consumer.
   const writer=await pool.connect(), nextWriter=await pool.connect();

@@ -23,11 +23,11 @@ export const createContactIntelligenceRouter = (db = pool) => {
         || typeof limit !== 'string' || !/^[1-9][0-9]{0,3}$/.test(limit) || Number(limit) > 1000) {
         return res.status(422).json({ success: false, code: 'INVALID_CURSOR' });
       }
-      const { rows } = await db.query(`SELECT sequence::text,kind,chat_id,phone,state,
+      const { rows } = await db.query(`SELECT e.sequence::text,kind,chat_id,phone,state,
         to_char(occurred_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') occurred_at,
         to_char(captured_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') captured_at
-        FROM contact_intelligence_events WHERE tenant_id=$1 AND sequence>$2 AND sequence<=$3
-        ORDER BY sequence LIMIT $4`, [source.tenant_id, after, source.last_sequence, Number(limit)]);
+        FROM contact_intelligence_events e WHERE tenant_id=$1 AND e.sequence>$2 AND e.sequence<=$3
+        ORDER BY e.sequence LIMIT $4`, [source.tenant_id, after, source.last_sequence, Number(limit)]);
       const nextCursor = rows.at(-1)?.sequence || after;
       return res.json({ success: true, data: { version: 1, source_id: source.source_id,
         activated_at: source.activation_iso, timezone: 'America/Mexico_City', events: rows,
