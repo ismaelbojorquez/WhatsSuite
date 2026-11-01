@@ -27,6 +27,7 @@ import { apiVersionHeader } from '../middlewares/apiVersion.js';
 import { authenticate } from '../middlewares/authMiddleware.js';
 import { audit } from '../middlewares/auditMiddleware.js';
 import warmupRoutes from './warmupRoutes.js';
+import contactIntelligenceRoutes from './contactIntelligenceRoutes.js';
 
 const router = Router();
 
@@ -34,6 +35,7 @@ router.use(apiVersionHeader);
 
 router.use('/health', healthRoutes); // health sin auth pero con header
 router.use('/auth', authRoutes); // login abierto; otras rutas de auth tienen su propio middleware
+router.use('/integrations/contact-intelligence', contactIntelligenceRoutes);
 
 // Rutas protegidas por auth + audit global
 router.use(authenticate, audit('api_call', (req) => ({ resource: req.path })));
