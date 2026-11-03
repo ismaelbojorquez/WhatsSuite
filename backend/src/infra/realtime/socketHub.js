@@ -7,6 +7,11 @@ import {
 let ioInstance = null;
 let eventsNamespace = null;
 
+// Actual authenticated sockets, never the persisted rows left behind by a crashed process.
+export const connectedWorkforceUsers = () => eventsNamespace === null ? null : new Set(
+  [...eventsNamespace.sockets.values()].filter(s => s.connected && s.data?.userId).map(s => s.data.userId)
+);
+
 export const initSocketHub = (io) => {
   ioInstance = io;
   eventsNamespace = io.of('/events');
